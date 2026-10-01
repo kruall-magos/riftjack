@@ -80,6 +80,10 @@ Reports are scoped to the bot, sender, room and Matrix thread, survive connector
 
 ## Reviewed publication
 
+Codex and Claude Code can request publication themselves through the `prepare_publish` MCP tool. Ask the bot to publish committed changes; it supplies `repository`, `remote` and `branch`. Riftjack sends the HTML review to the current conversation, then asks for confirmation. The tool waits for your decision and returns the publication result to the agent. There is no keyword in the agent's reply that triggers a push.
+
+The tool is available only in the initial owner's conversations with writable coding bots. Its local connection is created for each task and closed when that task ends. The tool timeout follows `TASK_TIMEOUT_SECONDS` (24 hours by default). The connector checks access and room privacy again before pushing; it does not expose an approval API to agents. Global Codex and Claude MCP settings are not edited. Other configured MCP servers retain their existing policies.
+
 The initial owner can ask an idle Codex or Claude Code bot to review and publish committed changes:
 
 ```text
@@ -102,7 +106,7 @@ node --import tsx scripts/prepare-publish.mts --workspace /path/to/workspace \
   --output /path/to/review.html
 ```
 
-It returns JSON identifying the report, commits and SHA-256, never pushes, and refuses to overwrite an existing output file. It reads the remote and may fetch its base commit into the local object store without changing working files or branches. The TypeScript API is `preparePublish`; the Matrix handler adds delivery, explicit confirmation and publication. MCP and external-worker approval endpoints are not implemented in this version. Ordinary shell `git push` approvals do not gain an HTML review automatically. Git hooks and host Git configuration remain trusted host code; this workflow is not an OS security boundary against other processes running under the same account.
+It returns JSON identifying the report, commits and SHA-256, never pushes, and refuses to overwrite an existing output file. It reads the remote and may fetch its base commit into the local object store without changing working files or branches. The TypeScript API is `preparePublish`; the Matrix handler adds delivery, explicit confirmation and publication. External-worker publication endpoints are not implemented. Ordinary shell `git push` approvals do not gain an HTML review automatically. Git hooks and host Git configuration remain trusted host code; this workflow is not an OS security boundary against other processes running under the same account.
 
 ## Account usage
 

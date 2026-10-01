@@ -8,6 +8,7 @@ import { AppServer, RpcError, type AgentMessage, type CodexInput, type Turn } fr
 import { codexInteraction } from './codex-interactions.js';
 import { installPlugin } from './plugins.js';
 import { engineReport } from './bot-status.js';
+import { startPublishMcp, PUBLISH_SERVER, publicationInstructions } from './publish-mcp.js';
 
 function deferred<T>() {
   let resolve!: (value: T) => void, reject!: (error: unknown) => void;
@@ -32,7 +33,7 @@ export function createCodexBackend(config: Config, state: State): Backend & { st
   };
   // One task per conversation key in this backend’s configured workspace.
   const tasks = new Map<string, Active>();
-  const run: Backend = async (mode, prompt, key, signal, sender, attachments = [], interact) => {
+  const run: Backend = async (mode, prompt, key, signal, sender, attachments = [], interact, publish) => {
     signal.throwIfAborted();
     if (mode !== 'codex') throw new Error('Manager requests must use the manager handler.');
     if (tasks.has(key)) throw new PublicError('A task is already running in this conversation.');
@@ -47,7 +48,9 @@ export function createCodexBackend(config: Config, state: State): Backend & { st
       void current.server?.close();
     };
     signal.addEventListener('abort', abort, { once: true });
+    let publication: Awaited<ReturnType<typeof startPublishMcp>> | undefined;
     try {
+      if (publish && interact && sender === config.owner && config.sandbox !== 'read-only') publication = await startPublishMcp(publish, signal);
       const outbox = await outboxDirectory(config.workspace, key);
       signal.throwIfAborted();
       const server = current.server = new AppServer(config, notification => {
@@ -81,7 +84,7 @@ export function createCodexBackend(config: Config, state: State): Backend & { st
       }
       const session = state.session(key);
       const saved = session.codex;
-      const instructions = mediaInstructions(outbox, config.maxMediaBytes);
+      const instructions = mediaInstructions(outbox, config.maxMediaBytes) + (publication ? publicationInstructions : '');
       const instructionsHash = createHash('sha256').update(instructions).digest('hex');
       const options = {
         cwd: config.workspace, sandbox: config.sandbox, approvalPolicy: interact ? config.codexApprovalPolicy : 'never', approvalsReviewer: 'user', modelProvider: 'openai', model: config.codexModel,
@@ -89,6 +92,8 @@ export function createCodexBackend(config: Config, state: State): Backend & { st
         // Configure new threads; resumed histories also need an explicit update below.
         developerInstructions: instructions,
         config: { forced_login_method: 'chatgpt', model_provider: 'openai', 'sandbox_workspace_write.network_access': false, web_search: 'disabled',
+          [`mcp_servers.${PUBLISH_SERVER}`]: publication ? { url: publication.url, http_headers: publication.headers,
+            required: true, enabled: true, tool_timeout_sec: Math.ceil(config.timeoutMs / 1000), enabled_tools: ['prepare_publish'] } : { enabled: false },
           ...(config.codexReasoningEffort ? { model_reasoning_effort: config.codexReasoningEffort } : {}),
         },
       };
@@ -123,6 +128,7 @@ export function createCodexBackend(config: Config, state: State): Backend & { st
       return parseMediaReply(messages.at(-1)?.text || '', outbox);
     } finally {
       current.ended = true;
+      await publication?.close();
       current.ready.resolve();
       await Promise.allSettled([...current.steering]);
       await current.server?.close();

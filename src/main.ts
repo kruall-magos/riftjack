@@ -225,9 +225,9 @@ async function main() {
         const request = parseProfileRequest(prompt);
         return request?.action === 'avatar' && !!resolveProfileTarget(accounts, request.userId, sender, access.owner);
       },
-      async run(mode, prompt, key, signal, sender, attachments, interact) {
+      async run(mode, prompt, key, signal, sender, attachments, interact, publish) {
         // Coding bots never interpret account-management commands.
-        if (account.kind !== 'manager' || mode !== 'manager') return backend(mode, prompt, key, signal, sender, attachments, interact);
+        if (account.kind !== 'manager' || mode !== 'manager') return backend(mode, prompt, key, signal, sender, attachments, interact, publish);
         const profileRequest = parseProfileRequest(prompt);
         if (profileRequest) return updateBotProfile(profileRequest, {
           accounts, owner: access.owner, sender, signal, attachments: attachments ?? [], maxBytes: config.maxMediaBytes,

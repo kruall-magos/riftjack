@@ -7,13 +7,14 @@ import { MANAGER_HELP } from './manager-help.js';
 import { botHelp } from './bot-help.js';
 import { isMedia, type MediaContent, type IncomingAttachment, type OutgoingAttachment, type BackendReply } from './media.js';
 import { Interactions, type Interact, type ReactionControls } from './interactions.js';
+import type { PublishAction } from './publish-mcp.js';
 
 export type MatrixEvent = {
   type?: string; event_id?: string; sender?: string; origin_server_ts?: number;
   content?: MediaContent & { 'm.relates_to'?: { rel_type?: string; event_id?: string; key?: string; 'm.in_reply_to'?: { event_id: string } } };
 };
 export type Mode = 'codex' | 'claude' | 'grok' | 'manager';
-export type Backend = (mode: Mode, prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[], interact?: Interact) => Promise<string | BackendReply>;
+export type Backend = (mode: Mode, prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[], interact?: Interact, publish?: PublishAction) => Promise<string | BackendReply>;
 export type Steer = (prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[]) => Promise<boolean>;
 type Options = {
   botId: string; isAuthorized: (user: string) => boolean; kind: Mode; since: number; timeoutMs: number;
@@ -180,6 +181,7 @@ export class Bridge {
         await this.authorize(room, current);
         current.running = true;
         const requestEvent = next.event;
+        const turnLifetime = new AbortController();
         const interact: Interact = (request, requestSignal) => current.interactions.ask(request,
           AbortSignal.any([controller.signal, requestSignal]), async (text, controls, markdown) => {
             await this.authorize(room, current);
@@ -192,11 +194,23 @@ export class Bridge {
             if (o.confirmation) await o.confirmation(room, requestEvent, text, controls, markdown);
             else await o.reply(room, requestEvent, text);
           });
+        const publish: PublishAction | undefined = o.publish && event.sender === o.owner ? async (input, callSignal) => {
+          if (current.publication) throw new PublicError('A publication review is already pending.');
+          const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
+          signal.throwIfAborted();
+          current.publication = true;
+          try {
+            await this.authorize(room, current);
+            signal.throwIfAborted();
+            return await o.publish!(input, signal, interact, () => this.authorize(room, current));
+          }
+          finally { current.publication = false; }
+        } : undefined;
         const task = verb === 'publish' ? o.publish!(publication, controller.signal, interact, () => this.authorize(room, current))
-          : o.run(verb as Mode, next.prompt, key, controller.signal, event.sender, next.attachments, interact);
+          : o.run(verb as Mode, next.prompt, key, controller.signal, event.sender, next.attachments, interact, publish);
         current.markReady();
         let result: string | BackendReply;
-        try { result = await task; } finally { current.running = false; current.interactions.close(); }
+        try { result = await task; } finally { turnLifetime.abort(); current.running = false; current.interactions.close(); }
         while (current.buffered) await current.steering;
         controller.signal.throwIfAborted();
         const respond = (text: string) => o.reply(room, next!.event, text, !next!.prompt.startsWith('!'));

@@ -8,6 +8,7 @@ import type { State } from './state.js';
 import { PublicError } from './accounts.js';
 import { imageMime, mediaInstructions, outboxDirectory, parseMediaReply, readOutgoing, type IncomingAttachment } from './media.js';
 import { CLAUDE_DENY, claudeInteraction } from './claude-interactions.js';
+import { startPublishMcp, PUBLISH_SERVER, PUBLISH_TOOL, publicationInstructions, type PublishConnection } from './publish-mcp.js';
 
 const record = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
 
@@ -115,7 +116,7 @@ export function claudeApprovals(config: Config): boolean {
   return config.sandbox !== 'read-only' && config.claudeApprovalPolicy === 'on-request';
 }
 
-export function claudeArguments(config: Config, session?: string, interactive = false, instructions?: string): string[] {
+export function claudeArguments(config: Config, session?: string, interactive = false, instructions?: string, publication?: PublishConnection): string[] {
   const readOnly = config.sandbox === 'read-only';
   const tools = readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash';
   const settings = {
@@ -125,6 +126,11 @@ export function claudeArguments(config: Config, session?: string, interactive = 
     '--permission-mode', readOnly ? 'dontAsk' : 'acceptEdits', '--tools', tools,
     '--settings', JSON.stringify(settings)];
   if (readOnly) args.push('--allowedTools', 'Read,Glob,Grep');
+  if (publication && !readOnly) {
+    args.push('--mcp-config', JSON.stringify({ mcpServers: { [PUBLISH_SERVER]: {
+      type: 'http', url: publication.url, headers: publication.headers, timeout: config.timeoutMs,
+    } } }), '--allowedTools', PUBLISH_TOOL);
+  }
   // Permission prompts arrive as stream-json control requests and are answered in Matrix.
   if (interactive) args.push('--permission-prompt-tool', 'stdio');
   if (config.claudeModel) args.push('--model', config.claudeModel);
@@ -154,7 +160,7 @@ export function createClaudeBackend(config: Config, state: State): Backend & { s
   const run: Backend = async (...args) => {
     try { return await turn(...args); } catch (error) { checked = false; throw error; }
   };
-  const turn: Backend = async (mode, prompt, key, signal, _sender, attachments = [], interact) => {
+  const turn: Backend = async (mode, prompt, key, signal, sender, attachments = [], interact, publish) => {
     if (mode !== 'claude') throw new Error('Claude backend received the wrong bot kind.');
     signal.throwIfAborted();
     if (!checked) { await checkClaude(config, signal); checked = true; }
@@ -169,7 +175,11 @@ export function createClaudeBackend(config: Config, state: State): Backend & { s
     const close = () => { for (const controller of pending.values()) controller.abort(); pending.clear(); };
     const answer = (stdin: ClaudeInput, requestId: string, response: object) =>
       stdin.write({ type: 'control_response', response: { subtype: 'success', request_id: requestId, response } });
-    try { await runClaude(config, claudeArguments(config, state.session(key).claude, interactive, mediaInstructions(outbox, config.maxMediaBytes)), signal, (line, stdin) => {
+    let publication: Awaited<ReturnType<typeof startPublishMcp>> | undefined;
+    try {
+      if (publish && interact && sender === config.owner && config.sandbox !== 'read-only') publication = await startPublishMcp(publish, signal);
+      await runClaude(config, claudeArguments(config, state.session(key).claude, interactive,
+        mediaInstructions(outbox, config.maxMediaBytes) + (publication ? publicationInstructions : ''), publication), signal, (line, stdin) => {
       let message: any;
       try { message = JSON.parse(line); } catch { throw new PublicError('Claude Code returned invalid stream-json output. Check its installed version.'); }
       if (typeof message.session_id === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(message.session_id)) {
@@ -214,7 +224,7 @@ export function createClaudeBackend(config: Config, state: State): Backend & { s
         result = typeof message.result === 'string' ? message.result : assistantText;
         close(); stdin.end();
       }
-    }, input, interactive); } finally { close(); }
+    }, input, interactive); } finally { close(); await publication?.close(); }
     signal.throwIfAborted();
     if (result === undefined || !sessionId) throw new PublicError('Claude exited without a complete result and session ID. Please retry after checking its installed version.');
     return parseMediaReply(result, outbox);
