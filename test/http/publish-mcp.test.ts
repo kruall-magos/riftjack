@@ -134,7 +134,11 @@ if (args.includes('--print')) {
   if (method === 'account/read') reply({ account: { type: 'chatgpt' } });
   if (method === 'thread/start' || method === 'thread/resume') {
     const c = params.config['mcp_servers.riftjack_publish'];
-    if (!c.required || c.tool_timeout_sec !== 86400) process.exit(2);
+    // Codex otherwise asks an empty MCP consent form before entering the tool,
+    // so no HTML can be generated or delivered. Only this reviewed tool is allowed.
+    if (!c.required || c.tool_timeout_sec !== 86400 ||
+        c.tools?.prepare_publish?.approval_mode !== 'approve' ||
+        Object.keys(c.tools).length !== 1 || c.default_tools_approval_mode !== undefined) process.exit(2);
     connection = { url: c.url, headers: c.http_headers };
     reply({ thread: { id: 'thread' } });
   }

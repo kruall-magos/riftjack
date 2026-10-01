@@ -82,7 +82,7 @@ Reports are scoped to the bot, sender, room and Matrix thread, survive connector
 
 Codex and Claude Code can request publication themselves through the `prepare_publish` MCP tool. Ask the bot to publish committed changes; it supplies `repository`, `remote` and `branch`. Riftjack sends the HTML review to the current conversation, then asks for confirmation. The tool waits for your decision and returns the publication result to the agent. There is no keyword in the agent's reply that triggers a push.
 
-The tool is available only in the initial owner's conversations with writable coding bots. Its local connection is created for each task and closed when that task ends. The tool timeout follows `TASK_TIMEOUT_SECONDS` (24 hours by default). The connector checks access and room privacy again before pushing; it does not expose an approval API to agents. Global Codex and Claude MCP settings are not edited. Other configured MCP servers retain their existing policies.
+The tool is available only in the initial owner's conversations with writable coding bots. Its local connection is created for each task and closed when that task ends. The tool timeout follows `TASK_TIMEOUT_SECONDS` (24 hours by default). The connector checks access and room privacy again before pushing; it does not expose an approval API to agents. Global Codex and Claude MCP settings are not edited. Starting `prepare_publish` is allowed without a preliminary tool-consent prompt; publication still requires the separate Matrix confirmation after report delivery. This exception is limited to that one connector tool. Other configured MCP servers retain their existing policies.
 
 The initial owner can ask an idle Codex or Claude Code bot to review and publish committed changes:
 

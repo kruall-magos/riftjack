@@ -93,7 +93,11 @@ export function createCodexBackend(config: Config, state: State): Backend & { st
         developerInstructions: instructions,
         config: { forced_login_method: 'chatgpt', model_provider: 'openai', 'sandbox_workspace_write.network_access': false, web_search: 'disabled',
           [`mcp_servers.${PUBLISH_SERVER}`]: publication ? { url: publication.url, http_headers: publication.headers,
-            required: true, enabled: true, tool_timeout_sec: Math.ceil(config.timeoutMs / 1000), enabled_tools: ['prepare_publish'] } : { enabled: false },
+            required: true, enabled: true, tool_timeout_sec: Math.ceil(config.timeoutMs / 1000), enabled_tools: ['prepare_publish'],
+            // Invoking this tool starts the review; requestPublish itself requires Matrix
+            // approval after delivering the HTML. Avoid an empty MCP consent form first.
+            tools: { prepare_publish: { approval_mode: 'approve' } },
+          } : { enabled: false },
           ...(config.codexReasoningEffort ? { model_reasoning_effort: config.codexReasoningEffort } : {}),
         },
       };
