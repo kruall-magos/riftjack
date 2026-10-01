@@ -10,8 +10,15 @@ Run development commands from the repository directory, unlike the instance comm
 npm run check
 npm test
 python3 -m unittest discover -s test -p '*_test.py'
-npm audit
 ```
+
+`npm test` runs the tests in `test/` without opening HTTP listening ports. They use local files, child-process stubs and mocked transports; run them in the normal sandbox without requesting network or port access.
+
+`npm run test:http` runs `test/http/*.test.ts`. These tests bind an ephemeral port on `127.0.0.1` and make loopback requests, including from the Python worker client. They use no live Matrix service or model account. A sandbox that blocks listening ports may require permission for this command.
+
+Run the HTTP suite when changing the worker HTTP server, API authentication/routing, long polling, request/response or attachment handling, `scripts/worker-client.py`, or queue/service behavior exposed through that API. Also run it when changing its fixtures, suite layout, or relevant dependencies. Changes confined to chat commands, formatting, documentation, or Codex/Claude adapters normally need only the relevant ordinary tests and type checking. Queue and worker-status unit tests remain in `npm test`.
+
+Use `npm run test:all` when a full validation is intended; it runs both suites and requires permission to open a loopback port in restricted environments. Put future port-opening tests under `test/http/`; keep tests that need no listener in `test/`. Type checking includes both directories. Run `npm audit` separately when checking dependencies; it contacts the package registry.
 
 Tests use mocked backends and registration responses: routing, authorization, manager-only access changes, persistence, cancellation, replay prevention, and provisioning. A fake App Server executable verifies ChatGPT-only authentication, credential filtering, session resumption, image/file inputs and replies, active-turn steering, startup/completion races, rejected updates, child-process failure, cancellation, and denial of unsolicited approvals. Confirmation tests cover command decisions, forms and questions, parallel RPC IDs, request withdrawal, stale/replayed answers, Matrix reply quotations, sender/room/thread isolation, revocation, timeout, and fail-closed delivery. Plugin tests verify owner-only access, explicit confirmation before installation, no model turn, no automatic retry, and browser-auth links. Bridge tests also check steering order, pending limits and attachments. Media tests use real attachment encryption/decryption with a mocked Matrix transport, including tampering, byte limits, cancellation, and outbox path restrictions. Restart tests cover owner-only commands and acknowledgement failures; real child-process tests verify sequential replacement, `.env` reload, and signal forwarding. Live confirmations, plugin/OAuth flows, steering, restart acknowledgement, attachment delivery, and rendering in Element require a separate check after upgrading the running connector. The Codex adapter was developed against the 0.159.1 App Server protocol. Codex is installed and updated independently of Riftjack; mock tests do not establish compatibility with every CLI release. Check the installed CLI’s generated App Server schemas when changing the protocol adapter, and verify a real task after a CLI upgrade.
 

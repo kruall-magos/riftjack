@@ -28,3 +28,13 @@ Claude, Codex and other integrations in a change description is permitted.
 Do not bypass commit policy hooks or CI. If a message fails the policy, revise the
 message. After initializing/cloning this repository, run `npm run hooks:install`.
 See `docs/commit-policy.md` for policy scope and server enforcement.
+
+# Test selection
+
+Run `npm test` and `npm run check` in the normal sandbox; the default test suite
+must not open listening ports. Keep port-opening tests in `test/http/` and run
+them with `npm run test:http` when changing the worker HTTP API, its Python
+client, queue/service behavior exposed by that API, or related dependencies and
+test infrastructure. Do not request broader permissions for the ordinary suite
+just because HTTP tests exist. `npm run test:all` explicitly runs both suites.
+See `docs/development.md` for the test scope and local-port requirements.

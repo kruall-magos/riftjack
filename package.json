@@ -16,7 +16,9 @@
     "check": "tsc --noEmit",
     "test": "node --import tsx --test test/*.test.ts test/*.test.mjs",
     "hooks:install": "node scripts/install-git-hooks.mjs",
-    "bootstrap:grok": "node scripts/run.mjs main --bootstrap-grok"
+    "bootstrap:grok": "node scripts/run.mjs main --bootstrap-grok",
+    "test:http": "node --import tsx --test test/http/*.test.ts",
+    "test:all": "npm test && npm run test:http"
   },
   "dependencies": {
     "@matrix-org/matrix-sdk-crypto-nodejs": "0.6.6",
