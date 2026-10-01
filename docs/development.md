@@ -36,3 +36,13 @@ Review the staged files and scan for credentials. Runtime data and real deployme
 Keep the README focused on the first successful conversation. Put command details in chat.md or manager.md, installation details in setup.md, and lifecycle behavior in operations.md. Describe current behavior and known limitations; release-specific migration notes should identify the affected version.
 
 Built-in messages, help and documentation use English; agent conversations can use any supported language. Use neutral examples such as `projects/demo` and `@alice:example.com`, without personal conversation details or real deployment paths. Unicode names, paths and messages remain valid test inputs. Tests should check behavior and data rather than incidental wording or whitespace, except when the displayed text or layout is the behavior being tested.
+
+
+For a local outgoing-media benchmark, create a regular test file and run:
+
+```sh
+node --import tsx scripts/benchmark-media.mts streamed /absolute/path/test.bin /absolute/path/streamed.json
+node --import tsx scripts/benchmark-media.mts buffered /absolute/path/test.bin /absolute/path/buffered.json
+```
+
+Each command runs a separate Node process with a loopback HTTP receiver and verifies the received ciphertext hash. The report records elapsed time and kernel peak RSS, including the receiver. `buffered` reproduces the former whole-file encryption and SDK upload for comparison. These measurements do not include a Matrix homeserver or recipient download. Benchmark inputs and result files are local data; keep them outside the checkout.

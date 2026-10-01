@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { Attachment, EncryptedAttachment } from '@matrix-org/matrix-sdk-crypto-nodejs';
 import type { EncryptedFile, MatrixClient } from '@vector-im/matrix-bot-sdk';
 import { PublicError } from './accounts.js';
+import { uploadEncrypted, type UploadMeasurement } from './media-upload.js';
 
 export const MAX_ATTACHMENTS = 10;
 export type IncomingAttachment = { path: string; name: string; mimetype: string; size: number; image: boolean };
@@ -101,7 +102,7 @@ export function parseMediaReply(text: string, root: string): string | BackendRep
   return { text: text.replace(blocks[0][0], '').trim(), attachments };
 }
 
-export async function readOutgoing(file: OutgoingAttachment, maxBytes: number): Promise<Buffer> {
+async function openOutgoing(file: OutgoingAttachment, maxBytes: number) {
   const root = await realpath(file.root);
   const path = await realpath(file.path);
   if (root !== file.root || path !== file.path || !within(root, path)) throw new PublicError('Attachment symlinks and paths outside the outbox are not allowed.');
@@ -110,6 +111,13 @@ export async function readOutgoing(file: OutgoingAttachment, maxBytes: number): 
     const stat = await handle.stat();
     if (!stat.isFile() || stat.nlink !== 1) throw new PublicError('Attachments must be regular files, not links.');
     if (stat.size > maxBytes) throw new PublicError(`Attachment exceeds the ${maxBytes}-byte limit.`);
+    return { handle, stat };
+  } catch (error) { await handle.close(); throw error; }
+}
+
+export async function readOutgoing(file: OutgoingAttachment, maxBytes: number): Promise<Buffer> {
+  const { handle } = await openOutgoing(file, maxBytes);
+  try {
     // Bound reads even if another process grows the file after stat().
     const chunks: Buffer[] = [];
     let size = 0;
@@ -154,8 +162,8 @@ export async function readLimited(response: Response, maxBytes: number, signal: 
   }
 }
 
-type MediaClient = Pick<MatrixClient, 'mxcToHttp' | 'uploadContent' | 'sendMessage'>;
-type MediaOptions = { workspace: string; homeserver: string; accessToken: string; maxBytes: number; scope: string };
+type MediaClient = Pick<MatrixClient, 'mxcToHttp' | 'sendMessage'>;
+type MediaOptions = { workspace: string; homeserver: string; accessToken: string; maxBytes: number; scope: string; uploadTimeoutMs?: number; reportUpload?: (measurement: UploadMeasurement) => void };
 export class MatrixMedia {
   constructor(private client: MediaClient, private options: MediaOptions, private fetcher: typeof fetch = fetch) {}
 
@@ -191,26 +199,41 @@ export class MatrixMedia {
   async prepareAttachment(file: OutgoingAttachment, signal: AbortSignal, authorize: () => Promise<void>): Promise<Record<string, unknown>> {
     signal.throwIfAborted();
     await authorize();
-    const data = await readOutgoing(file, this.options.maxBytes);
-    const name = safeName(file.name || basename(file.path));
-    const mimetype = fileMime(file.path, data);
-    const encrypted = Attachment.encrypt(data);
-    const encryptionInfo = encrypted.mediaEncryptionInfo;
-    if (!encryptionInfo) throw new Error('Missing media encryption information.');
-    const info = JSON.parse(encryptionInfo) as Omit<EncryptedFile, 'url'>;
-    signal.throwIfAborted();
-    await authorize();
-    signal.throwIfAborted();
-    // The server sees ciphertext only; the filename and media metadata stay inside the encrypted event.
-    const url = await this.client.uploadContent(Buffer.from(encrypted.encryptedData), 'application/octet-stream');
-    signal.throwIfAborted();
-    await authorize();
-    signal.throwIfAborted();
-    return {
-      msgtype: imageMime(data) ? 'm.image' : mimetype.startsWith('audio/') ? 'm.audio' : 'm.file',
-      body: name, filename: name, info: { mimetype, size: data.length },
-      file: { ...info, url },
-    };
+    const { handle, stat } = await openOutgoing(file, this.options.maxBytes);
+    try {
+      const header = Buffer.alloc(16);
+      const { bytesRead } = await handle.read(header, 0, header.length, 0);
+      const prefix = header.subarray(0, bytesRead);
+      const name = safeName(file.name || basename(file.path));
+      const mimetype = fileMime(file.path, prefix);
+      async function* chunks() {
+        let position = 0;
+        while (true) {
+          signal.throwIfAborted();
+          const buffer = Buffer.alloc(Math.min(64 * 1024, stat.size + 1 - position));
+          const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+          if (!bytesRead) break;
+          position += bytesRead;
+          if (position > stat.size) throw new PublicError('Attachment changed during upload.');
+          yield buffer.subarray(0, bytesRead);
+        }
+        const after = await handle.stat();
+        if (position !== stat.size || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.nlink !== 1) {
+          throw new PublicError('Attachment changed during upload.');
+        }
+      }
+      await authorize();
+      signal.throwIfAborted();
+      const encrypted = await uploadEncrypted(chunks(), { homeserver: this.options.homeserver,
+        accessToken: this.options.accessToken, size: stat.size, timeoutMs: this.options.uploadTimeoutMs ?? 1_800_000,
+        signal, fetcher: this.fetcher, report: this.options.reportUpload });
+      await authorize();
+      signal.throwIfAborted();
+      return {
+        msgtype: imageMime(prefix) ? 'm.image' : mimetype.startsWith('audio/') ? 'm.audio' : 'm.file',
+        body: name, filename: name, info: { mimetype, size: stat.size }, file: encrypted,
+      };
+    } finally { await handle.close(); }
   }
 
   async send(room: string, files: OutgoingAttachment[], relation: object, signal: AbortSignal, authorize: () => Promise<void>): Promise<void> {

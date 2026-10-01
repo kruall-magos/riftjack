@@ -154,7 +154,9 @@ async function main() {
     const client = account.kind === 'grok' ? new WorkerMatrixClient(config.homeserver, account.accessToken, storage, crypto)
       : new MatrixClient(config.homeserver, account.accessToken, storage, crypto);
     const media = new MatrixMedia(client, { workspace: botConfig.workspace, homeserver: config.homeserver,
-      accessToken: account.accessToken, maxBytes: config.maxMediaBytes, scope: account.userId });
+      accessToken: account.accessToken, maxBytes: config.maxMediaBytes, scope: account.userId,
+      uploadTimeoutMs: config.mediaUploadTimeoutMs,
+      reportUpload: measurement => console.log(JSON.stringify({ time: new Date().toISOString(), ...measurement })) });
     const me = await client.getWhoAmI();
     if (me.user_id !== account.userId || !me.device_id) throw new PublicError('Bot ' + account.userId + ' needs its own device-bound Matrix access token.');
     const authorized = (sender: string) => access.has(sender, account.kind === 'manager' ? undefined : account.userId);
@@ -181,7 +183,7 @@ async function main() {
             if (stopping || !(await privateRoom(task.room, task.event.sender!))) throw new PublicError('Worker reply withheld because access or room privacy changed.');
           };
           const contents: Record<string, unknown>[] = task.response!.text ? replyContent(task.response!.text, true, false) : [];
-          for (const file of task.response!.files) contents.push(await media.prepareAttachment({ ...file, root: join(workerDir, 'uploads') }, AbortSignal.timeout(60_000), authorize));
+          for (const file of task.response!.files) contents.push(await media.prepareAttachment({ ...file, root: join(workerDir, 'uploads') }, AbortSignal.timeout(config.mediaUploadTimeoutMs), authorize));
           const encrypted: unknown[] = [];
           for (const content of contents) {
             await authorize();

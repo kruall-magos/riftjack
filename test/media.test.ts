@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync, symlinkSync, linkSync, statSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync, symlinkSync, linkSync, statSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Attachment, EncryptedAttachment } from '@matrix-org/matrix-sdk-crypto-nodejs';
@@ -19,15 +19,21 @@ function setup(t: { after(fn: () => void): void }, maxBytes = 1024) {
   let fetches = 0;
   const media = new MatrixMedia({
     mxcToHttp: async () => 'https://matrix.test/_matrix/client/v1/media/download/matrix.test/id',
-    uploadContent: async (data, type, name) => {
-      assert.equal(type, 'application/octet-stream'); assert.equal(name, undefined);
-      uploads.push(data); return 'mxc://matrix.test/id';
-    },
     sendMessage: async (room, content) => { assert.equal(room, '!dm:test'); messages.push(content); return '$sent'; },
   }, { workspace: dir, homeserver: 'https://matrix.test', accessToken: 'test-token', maxBytes, scope: '@bot:test' }, async (_url, options) => {
     fetches++;
     assert.equal(options?.redirect, 'error');
     assert.equal((options?.headers as Record<string, string>).Authorization, 'Bearer test-token');
+    if (options?.method === 'POST') {
+      assert.equal(String(_url), 'https://matrix.test/_matrix/media/v3/upload');
+      assert.equal((options.headers as Record<string, string>)['Content-Type'], 'application/octet-stream');
+      const chunks: Buffer[] = [];
+      for await (const chunk of options.body as unknown as AsyncIterable<Buffer>) chunks.push(chunk);
+      const data = Buffer.concat(chunks);
+      assert.equal(data.length, Number((options.headers as Record<string, string>)['Content-Length']));
+      uploads.push(data);
+      return Response.json({ content_uri: 'mxc://matrix.test/id' });
+    }
     return new Response(new Uint8Array(download));
   });
   function encrypted(data: Buffer): EncryptedFile {
@@ -173,7 +179,7 @@ test('each conversation has one stable outbox that is emptied at the start of ev
 });
 
 test('outbox refuses symlinks, hard links, directories, traversal and oversized files', async t => {
-  const f = setup(t);
+  const f = setup(t, 10);
   const root = await mediaDirectory(f.dir, 'outgoing', 'key');
   const secret = join(f.dir, 'secret'); writeFileSync(secret, 'secret');
   symlinkSync(secret, join(root, 'symlink'));
@@ -181,6 +187,7 @@ test('outbox refuses symlinks, hard links, directories, traversal and oversized 
   writeFileSync(join(root, 'big'), Buffer.alloc(11));
   for (const path of [secret, join(root, 'symlink'), join(root, 'hardlink'), root, join(root, 'big')]) {
     await assert.rejects(readOutgoing({ root, path }, 10));
+    await assert.rejects(f.media.send('!dm:test', [{ root, path }], {}, signal(), async () => {}));
   }
   const path = join(root, 'ok'); writeFileSync(path, '12345');
   assert.equal((await readOutgoing({ root, path }, 5)).toString(), '12345');
@@ -202,4 +209,36 @@ test('attachment size configuration is bounded', async t => {
   for (const value of ['-1', '0', 'NaN', '1.5', 'Infinity', '1073741825']) {
     assert.throws(() => loadConfig({ ...env, MAX_MEDIA_BYTES: value }), /MAX_MEDIA_BYTES/);
   }
+});
+
+
+test('upload deadlines are explicit and bounded independently of task duration', async t => {
+  const f = setup(t);
+  const env = { MATRIX_HOMESERVER: 'https://matrix.test', MATRIX_OWNER_ID: '@owner:test', RIFTJACK_WORKSPACE: f.dir };
+  assert.equal(loadConfig(env).mediaUploadTimeoutMs, 1_800_000);
+  assert.equal(loadConfig({ ...env, MEDIA_UPLOAD_TIMEOUT_SECONDS: '86400' }).mediaUploadTimeoutMs, 86_400_000);
+  for (const value of ['0', '-1', 'NaN', '86401']) {
+    assert.throws(() => loadConfig({ ...env, MEDIA_UPLOAD_TIMEOUT_SECONDS: value }), /MEDIA_UPLOAD_TIMEOUT_SECONDS/);
+  }
+});
+
+
+test('files changed after opening cannot deliver encryption keys', async t => {
+  const f = setup(t);
+  const root = await mediaDirectory(f.dir, 'outgoing', 'changing');
+  const path = join(root, 'changing.bin');
+  let sent = 0;
+  for (const content of ['short', 'a much longer replacement', 'changed!']) {
+    writeFileSync(path, 'original');
+    const media = new MatrixMedia({ mxcToHttp: async () => '', sendMessage: async () => { sent++; return '$sent'; } },
+      { workspace: f.dir, homeserver: 'https://matrix.test', accessToken: 'token', maxBytes: 1024, scope: 'test' },
+      async (_url, init) => {
+        writeFileSync(path, content);
+        utimesSync(path, new Date(), new Date(Date.now() + 2000));
+        for await (const _ of init!.body as unknown as AsyncIterable<Buffer>) { /* consume */ }
+        return Response.json({ content_uri: 'mxc://matrix.test/id' });
+      });
+    await assert.rejects(media.send('!dm:test', [{ root, path }], {}, signal(), async () => {}), /changed/);
+  }
+  assert.equal(sent, 0);
 });
