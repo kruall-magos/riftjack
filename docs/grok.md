@@ -98,7 +98,7 @@ python3 worker-client.py reply task.json --text-file answer.txt --file report.pd
 ```
 
 Images, files and audio use Matrix attachment encryption. Up to ten files may be
-attached; their **combined** size must fit `MAX_MEDIA_BYTES` (20 MiB by default).
+attached; their **combined** size must fit `MAX_MEDIA_BYTES` (1 GiB by default).
 Audio transcription is the worker's responsibility. The API accepts file bytes,
 never paths to files on the connector host.
 

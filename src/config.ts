@@ -31,9 +31,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 86_400_000) {
     throw new Error('TASK_TIMEOUT_SECONDS must be between 1 and 86400.');
   }
-  const maxMediaBytes = Number(env.MAX_MEDIA_BYTES || '20971520');
-  if (!Number.isSafeInteger(maxMediaBytes) || maxMediaBytes < 1 || maxMediaBytes > 104_857_600) {
-    throw new Error('MAX_MEDIA_BYTES must be between 1 and 104857600 (100 MiB).');
+  const maxMediaBytes = Number(env.MAX_MEDIA_BYTES || '1073741824');
+  if (!Number.isSafeInteger(maxMediaBytes) || maxMediaBytes < 1 || maxMediaBytes > 1_073_741_824) {
+    throw new Error('MAX_MEDIA_BYTES must be between 1 and 1073741824 (1 GiB).');
   }
   const workerPort = Number(env.WORKER_PORT || '0');
   if (!Number.isInteger(workerPort) || workerPort < 0 || workerPort > 65535) throw new Error('WORKER_PORT must be 0 (disabled) or a port from 1 to 65535.');

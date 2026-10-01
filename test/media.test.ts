@@ -195,8 +195,11 @@ test('media root symlinks cannot redirect incoming or outgoing files', async t =
 test('attachment size configuration is bounded', async t => {
   const f = setup(t);
   const env = { MATRIX_HOMESERVER: 'https://matrix.test', MATRIX_OWNER_ID: '@owner:test', RIFTJACK_WORKSPACE: f.dir };
-  assert.equal(loadConfig(env).maxMediaBytes, 20 * 1024 * 1024);
-  for (const value of ['-1', '0', 'NaN', '1.5', '104857601']) {
+  assert.equal(loadConfig(env).maxMediaBytes, 1024 ** 3);
+  for (const value of ['1', '20971520', '1073741824']) {
+    assert.equal(loadConfig({ ...env, MAX_MEDIA_BYTES: value }).maxMediaBytes, Number(value));
+  }
+  for (const value of ['-1', '0', 'NaN', '1.5', 'Infinity', '1073741825']) {
     assert.throws(() => loadConfig({ ...env, MAX_MEDIA_BYTES: value }), /MAX_MEDIA_BYTES/);
   }
 });

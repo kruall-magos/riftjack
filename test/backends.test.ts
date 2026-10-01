@@ -49,7 +49,12 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     if (p.pluginName === 'failure') return send({ id, error: { code: -32603, message: 'Secret diagnostic' } });
     return respond(id, { authPolicy: 'ON_USE', appsNeedingAuth: [{ name: 'GitHub', installUrl: 'https://github.test/login' }] });
   }
-  if (method === 'thread/start' || method === 'thread/resume') { instructions = p.config?.developer_instructions; return respond(id, { thread: { id: threadId } }); }
+  if (method === 'thread/start' || method === 'thread/resume') { instructions = p.developerInstructions; return respond(id, { thread: { id: threadId } }); }
+  if (method === 'thread/inject_items') {
+    if (fs.existsSync(path.join(__dirname, 'reject-instructions'))) return send({ id, error: { code: -32603, message: 'Test injection failure' } });
+    instructions = p.items[0].content[0].text;
+    return respond(id, {});
+  }
   if (method === 'turn/start') {
     prompt = p.input[0].text;
     send({ method: 'turn/started', params: { threadId, turn: { id: turnId, status: 'inProgress', items: [] } } });
@@ -145,8 +150,55 @@ test('per-bot Codex workspace reaches the process, thread cwd and attachment out
 test('connector instructions are Codex developer instructions, not part of the user message', async t => {
   const f = setup(t);
   await f.backend('codex', 'hello', 'key', signal(), '@owner:test');
-  assert.match(f.calls().find(c => c.method === 'thread/start').params.config.developer_instructions, /conversation's outbox: ".*outbox"/);
+  assert.match(f.calls().find(c => c.method === 'thread/start').params.developerInstructions, /conversation's outbox: ".*outbox"/);
   assert.equal(f.calls().find(c => c.method === 'turn/start').params.input[0].text, 'hello');
+});
+
+test('resuming a Codex conversation explicitly refreshes the attachment limit', async t => {
+  const f = setup(t);
+  const first = createBackend({ ...f.config, maxMediaBytes: 20 * 1024 * 1024 }, f.state);
+  await first('codex', 'hello', 'key', signal(), '@owner:test');
+  const next = createBackend({ ...f.config, maxMediaBytes: 1024 ** 3 }, f.state);
+  await next('codex', '[attachment]', 'key', signal(), '@owner:test');
+  const start = f.calls().find(c => c.method === 'thread/start').params;
+  const resume = f.calls().find(c => c.method === 'thread/resume').params;
+  assert.match(start.developerInstructions, /20971520 bytes each/);
+  assert.match(resume.developerInstructions, /1073741824 bytes each/);
+  assert.equal(resume.threadId, 'thread_1');
+  assert.equal(resume.config.developer_instructions, undefined);
+  const calls = f.calls();
+  const index = calls.findIndex(c => c.method === 'thread/inject_items');
+  assert.ok(index > calls.findIndex(c => c.method === 'thread/resume'));
+  assert.ok(index < calls.map(c => c.method).lastIndexOf('turn/start'));
+  const item = calls[index].params.items[0];
+  assert.equal(item.role, 'developer');
+  assert.match(item.content[0].text, /1073741824 bytes each/);
+  assert.doesNotMatch(item.content[0].text, /20971520/);
+  assert.ok(f.state.session('key').codexInstructionsHash);
+  // A new backend and State instance exercise persistence across connector restarts.
+  const reloaded = createBackend({ ...f.config, maxMediaBytes: 1024 ** 3 }, new State(join(f.dir, 'sessions.json')));
+  await reloaded('codex', 'again', 'key', signal(), '@owner:test');
+  assert.equal(f.calls().filter(c => c.method === 'thread/inject_items').length, 1);
+});
+
+test('existing Codex histories without an instruction hash receive an update', async t => {
+  const f = setup(t);
+  f.state.update('key', { codex: 'thread_1' });
+  await f.backend('codex', 'hello', 'key', signal(), '@owner:test');
+  assert.equal(f.calls().filter(c => c.method === 'thread/inject_items').length, 1);
+});
+
+test('failed instruction updates do not start a turn or mark instructions as current', async t => {
+  const f = setup(t);
+  f.state.update('key', { codex: 'thread_1', codexInstructionsHash: 'previous' });
+  writeFileSync(join(f.dir, 'reject-instructions'), '');
+  await assert.rejects(f.backend('codex', 'hello', 'key', signal(), '@owner:test'));
+  assert.equal(f.calls().some(c => c.method === 'turn/start'), false);
+  assert.equal(f.state.session('key').codexInstructionsHash, 'previous');
+  rmSync(join(f.dir, 'reject-instructions'));
+  await f.backend('codex', 'retry', 'key', signal(), '@owner:test');
+  assert.equal(f.calls().filter(c => c.method === 'thread/inject_items').length, 2);
+  assert.notEqual(f.state.session('key').codexInstructionsHash, 'previous');
 });
 
 test('Codex uses an independently installed executable from PATH by default', async t => {

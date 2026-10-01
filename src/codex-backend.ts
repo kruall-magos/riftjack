@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Config } from './config.js';
 import type { Backend, Steer } from './bridge.js';
 import type { State } from './state.js';
@@ -77,20 +78,34 @@ export function createCodexBackend(config: Config, state: State): Backend & { st
         current.ready.resolve();
         return await installPlugin(server, match[1], signal, interact);
       }
-      const saved = state.session(key).codex;
+      const session = state.session(key);
+      const saved = session.codex;
+      const instructions = mediaInstructions(outbox, config.maxMediaBytes);
+      const instructionsHash = createHash('sha256').update(instructions).digest('hex');
       const options = {
         cwd: config.workspace, sandbox: config.sandbox, approvalPolicy: interact ? config.codexApprovalPolicy : 'never', approvalsReviewer: 'user', modelProvider: 'openai', model: config.codexModel,
-        config: { forced_login_method: 'chatgpt', model_provider: 'openai', 'sandbox_workspace_write.network_access': false, web_search: 'disabled',
-          // Connector instructions are developer instructions, not text repeated in every user message.
-          developer_instructions: mediaInstructions(outbox, config.maxMediaBytes) },
+        // Configure new threads; resumed histories also need an explicit update below.
+        developerInstructions: instructions,
+        config: { forced_login_method: 'chatgpt', model_provider: 'openai', 'sandbox_workspace_write.network_access': false, web_search: 'disabled' },
       };
       const thread = await server.request<{ thread: { id: string } }>(saved ? 'thread/resume' : 'thread/start', saved ? { ...options, threadId: saved, excludeTurns: true } : options);
       current.threadId = thread.thread.id;
       state.update(key, { codex: current.threadId });
       signal.throwIfAborted();
+      // Resume options do not replace developer messages already in model-visible history.
+      // Persist a new message only when the connector instructions have changed.
+      if (saved && session.codexInstructionsHash !== instructionsHash) {
+        await server.request('thread/inject_items', {
+          threadId: current.threadId,
+          items: [{ type: 'message', role: 'developer', content: [{ type: 'input_text',
+            text: 'Updated Matrix connector instructions. These supersede earlier Matrix attachment delivery instructions.\n' + instructions }] }],
+        });
+        signal.throwIfAborted();
+      }
       const started = await server.request<{ turn: Turn }>('turn/start', {
         threadId: current.threadId, input: input(prompt, attachments),
       });
+      state.update(key, { codexInstructionsHash: instructionsHash });
       current.turnId = started.turn.id;
       if (started.turn.status !== 'inProgress') { current.ended = true; current.done.resolve(started.turn); }
       current.ready.resolve();

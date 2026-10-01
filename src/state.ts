@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-export type Session = { codex?: string; claude?: string; grok?: string };
+export type Session = { codex?: string; codexInstructionsHash?: string; claude?: string; grok?: string };
 type Data = { version: 1; sessions: Record<string, Session>; seen: string[] };
 
 export class State {
