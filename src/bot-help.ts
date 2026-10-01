@@ -28,6 +28,8 @@ export function botHelp(kind: 'codex' | 'claude' | 'grok'): string {
       '- `!plugin install github` — install a plugin; replace `github` with its name.',
       'Wait for the active task to finish. The bot will ask you to confirm installation.',
     ] : []),
+    '### Reviewed publication · owner only',
+    '- `!publish {"repository":".","remote":"origin","branch":"main"}` — receive an HTML review, then confirm publishing the shown commits. The bot must be idle and writable. Paths are relative to its workspace.',
     '### Restart · owner only',
     '- `!restart` — restart all bots.\n- `!restart supervisor` — also restart the supervisor process.',
     'All active tasks must finish first. The startup notice returns to the same chat or thread.',

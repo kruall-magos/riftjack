@@ -1,10 +1,12 @@
 import { randomBytes } from 'node:crypto';
 import { PublicError } from './accounts.js';
 import { confirmationPrompt } from './confirmation-format.js';
+import type { OutgoingAttachment } from './media.js';
 
 export type Interaction = {
   text: string;
   markdown?: string;
+  attachments?: OutgoingAttachment[];
   approve?: object;
   deny: object;
   answer?: (text: string) => object;

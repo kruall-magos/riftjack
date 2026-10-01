@@ -30,6 +30,7 @@ type Options = {
   acceptManagerAvatar?: (prompt: string, sender: string) => boolean;
   sendAttachments?: (room: string, event: MatrixEvent, files: OutgoingAttachment[], signal: AbortSignal) => Promise<void>;
   status?: (key: string) => string;
+  publish?: (input: unknown, signal: AbortSignal, interact: Interact, authorize: () => Promise<void>) => Promise<string>;
   // Account usage and limits of the engine.
   usage?: (signal: AbortSignal) => Promise<string>;
   report: (error: unknown) => void;
@@ -43,7 +44,7 @@ type Active = {
   room: string; event: MatrixEvent;
   key: string; sender: string; controller: AbortController; running: boolean; failed: boolean;
   ready: Promise<void>; markReady: () => void; steering: Promise<void>; buffered: number; followups: Followup[];
-  interactions: Interactions;
+  interactions: Interactions; publication?: boolean;
 };
 
 export function sessionKey(room: string, event: MatrixEvent) {
@@ -71,8 +72,9 @@ export class Bridge {
     const prompt = body?.trim() || (media ? 'An attachment was sent. Describe what you can inspect, or ask what to do with it.' : '');
     if (!prompt || !(await o.isPrivateRoom(room, event.sender)) || !o.isAuthorized(event.sender) || !o.state.claim(event.event_id)) return;
     // Attachments never execute conversation controls. Manager avatar captions are allowed explicitly below.
+    const publishCommand = !media && /^!publish(?:\s|$)/.test(prompt);
     const restartSupervisor = !media && /^!restart\s+supervisor$/.test(prompt);
-    const verb = restartSupervisor ? 'restart' : (!media && /^!(help|reset|cancel|restart|usage|status)$/.exec(prompt)?.[1]) || o.kind;
+    const verb = publishCommand ? 'publish' : restartSupervisor ? 'restart' : (!media && /^!(help|reset|cancel|restart|usage|status)$/.exec(prompt)?.[1]) || o.kind;
     const key = sessionKey(room, event);
     const reply = (text: string) => o.reply(room, event, text);
     if (this.stopped || o.isStopping?.()) { await reply('The connector is restarting or stopping. Please retry in a few seconds.'); return; }
@@ -91,6 +93,13 @@ export class Bridge {
     } else if (!media && prompt.startsWith('!') && verb === o.kind) {
       await reply('Unknown command or invalid syntax. Send !help to see the available commands.');
       return;
+    }
+    let publication: unknown;
+    if (verb === 'publish') {
+      if (!o.publish) { await reply('Reviewed publication is not available for this bot.'); return; }
+      if (event.sender !== o.owner) { await reply('Only the initial owner can publish through this connector.'); return; }
+      try { publication = JSON.parse(prompt.slice('!publish'.length).trim()); }
+      catch { await reply('Use !publish {"repository":".","remote":"origin","branch":"main"}.'); return; }
     }
     if (verb === 'restart') {
       if (event.sender !== o.owner) { await reply('Only the initial owner can restart the connector.'); return; }
@@ -143,9 +152,10 @@ export class Bridge {
     }
     if (!prompt || prompt.length > 16_000) { await o.reply(room, event, 'Supply a prompt of 1–16,000 characters.\n' + help(o.kind), true); return; }
     if (this.active) {
-      if ((verb === 'codex' || verb === 'claude') && this.active.key === key && o.steer) {
+      if ((verb === 'codex' || verb === 'claude') && this.active.key === key && !this.active.publication && o.steer) {
         await this.steer(this.active, room, event, prompt);
-      } else await reply('A task is running in this bot. Only messages in its active conversation can steer it; wait before resetting or starting another conversation.');
+      } else await reply(this.active.publication ? 'A publication review is pending. Use its confirmation controls or !cancel; ordinary messages cannot change the publication.'
+        : 'A task is running in this bot. Only messages in its active conversation can steer it; wait before resetting or starting another conversation.');
       return;
     }
     if (verb === 'reset') { o.state.reset(key); await reply('Your conversation state has been reset.'); return; }
@@ -153,7 +163,7 @@ export class Bridge {
     let markReady!: () => void;
     const ready = new Promise<void>(resolve => { markReady = resolve; });
     const current: Active = { room, event, key, sender: event.sender, controller, running: false, failed: false,
-      ready, markReady, steering: Promise.resolve(), buffered: 0, followups: [], interactions: new Interactions() };
+      ready, markReady, publication: verb === 'publish', steering: Promise.resolve(), buffered: 0, followups: [], interactions: new Interactions() };
     this.active = current;
     let timedOut = false;
     const timeout = setTimeout(() => {
@@ -162,7 +172,8 @@ export class Bridge {
       controller.abort();
     }, o.timeoutMs);
     try {
-      if (verb === 'codex' || verb === 'claude') await reply('Working on it…');
+      if (verb === 'publish') await reply('Preparing the complete publication review…');
+      else if (verb === 'codex' || verb === 'claude') await reply('Working on it…');
       let next: Followup | undefined = { prompt, event, attachments: await this.receive(room, event, current) };
       while (next) {
         controller.signal.throwIfAborted();
@@ -172,10 +183,17 @@ export class Bridge {
         const interact: Interact = (request, requestSignal) => current.interactions.ask(request,
           AbortSignal.any([controller.signal, requestSignal]), async (text, controls, markdown) => {
             await this.authorize(room, current);
+            if (request.attachments?.length) {
+              if (!o.sendAttachments) throw new PublicError('Review attachment delivery is not configured.');
+              await o.sendAttachments(room, requestEvent, request.attachments, AbortSignal.any([controller.signal, requestSignal]));
+              await this.authorize(room, current);
+              requestSignal.throwIfAborted();
+            }
             if (o.confirmation) await o.confirmation(room, requestEvent, text, controls, markdown);
             else await o.reply(room, requestEvent, text);
           });
-        const task = o.run(verb as Mode, next.prompt, key, controller.signal, event.sender, next.attachments, interact);
+        const task = verb === 'publish' ? o.publish!(publication, controller.signal, interact, () => this.authorize(room, current))
+          : o.run(verb as Mode, next.prompt, key, controller.signal, event.sender, next.attachments, interact);
         current.markReady();
         let result: string | BackendReply;
         try { result = await task; } finally { current.running = false; current.interactions.close(); }

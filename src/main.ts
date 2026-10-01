@@ -2,6 +2,7 @@ import { mkdirSync, openSync, closeSync, readFileSync, unlinkSync, writeFileSync
 import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { botStatus } from './bot-status.js';
+import { requestPublish } from './publish.js';
 import { MatrixClient, SimpleFsStorageProvider, RustSdkCryptoStorageProvider, LogService, LogLevel } from '@vector-im/matrix-bot-sdk';
 import { StoreType } from '@matrix-org/matrix-sdk-crypto-nodejs';
 import { loadConfig, type Config } from './config.js';
@@ -214,6 +215,8 @@ async function main() {
       steer: backend.steer,
       queuedUpdateMessage: account.kind === 'claude' ? 'Your update is queued for Claude Code in this conversation. It will run after the current step.' : undefined,
       since: Date.now(), timeoutMs: config.timeoutMs, state, report: diagnostics,
+      publish: (account.kind === 'codex' || account.kind === 'claude') && botConfig.sandbox !== 'read-only'
+        ? (input, signal, interact, authorize) => requestPublish(input, botConfig.workspace, botConfig.dataDir, botConfig.maxMediaBytes, signal, interact, authorize) : undefined,
       status: account.kind === 'codex' || account.kind === 'claude'
         ? key => botStatus(account.kind as 'codex' | 'claude', botConfig, state.session(key)) : undefined,
       usage: account.kind === 'claude' ? async signal => formatClaudeUsage(await claudeUsage(botConfig, signal))

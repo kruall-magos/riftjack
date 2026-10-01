@@ -78,6 +78,32 @@ The separate **Last CLI session report** section shows metadata reported when Co
 
 Reports are scoped to the bot, sender, room and Matrix thread, survive connector restarts, and are cleared by `!reset`. A new conversation has no report until its CLI starts a task. No other conversation's report or task details are shown. Grok's `!status` shows queue/lease/delivery counts; its model settings and workspace are controlled by the external worker and are not reported to Riftjack.
 
+## Reviewed publication
+
+The initial owner can ask an idle Codex or Claude Code bot to review and publish committed changes:
+
+```text
+!publish {"repository":".","remote":"origin","branch":"main"}
+```
+
+The repository path is relative to that bot's workspace (an absolute path inside it also works). Supply a configured remote name and the destination branch explicitly. The connector performs this structured command locally; it does not ask a model to interpret it. Read-only bots and external Grok workers cannot publish through this command.
+
+Riftjack resolves the push destination, reads its branch tip and prepares a self-contained HTML attachment. It contains the final diff and **every outgoing commit**, including changes later reverted. File sections collapse, added/deleted lines have colors and line numbers, and the file needs no JavaScript or external resources. Binary contents are marked as unavailable for text review. Uncommitted files, other local branches and unrelated tags are excluded. Git authentication must already work on the host; the connector does not collect credentials.
+
+After the attachment and confirmation text have been delivered, approve with the usual reaction or `!approve ID`, or decline with `!deny ID`. Delivery does not prove the report was opened. Approval applies to the shown commit, destination branch and expected remote tip only. Changed HEAD or destination invalidates the review. An explicit Git lease also prevents a concurrent remote update from being overwritten. Only fast-forward updates and new branches from complete (non-shallow) repositories are supported. There is no automatic retry after an uncertain push result.
+
+`!cancel`, access revocation and task timeout stop a pending review. Approval is conversation-scoped and expires on restart. Reports are deleted from the host after the request ends; the encrypted attachment remains in Matrix. `!status` remains available while reviewing, but ordinary chat messages cannot steer the publication into a different action. Reports over 100 outgoing commits or 8 MiB of diff text are refused rather than truncated. The normal attachment size limit also applies.
+
+A report-only CLI is available to agents and local tools:
+
+```sh
+node --import tsx scripts/prepare-publish.mts --workspace /path/to/workspace \
+  --request '{"repository":"project","remote":"origin","branch":"main"}' \
+  --output /path/to/review.html
+```
+
+It returns JSON identifying the report, commits and SHA-256, never pushes, and refuses to overwrite an existing output file. It reads the remote and may fetch its base commit into the local object store without changing working files or branches. The TypeScript API is `preparePublish`; the Matrix handler adds delivery, explicit confirmation and publication. MCP and external-worker approval endpoints are not implemented in this version. Ordinary shell `git push` approvals do not gain an HTML review automatically. Git hooks and host Git configuration remain trusted host code; this workflow is not an OS security boundary against other processes running under the same account.
+
 ## Account usage
 
 The initial owner can send `!usage` to a Claude bot to see the Claude account's current session and weekly limits and their reset times. It runs Claude Code's local `/usage` command, which makes no model request, and works while a task is running.
