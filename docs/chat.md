@@ -2,6 +2,8 @@
 
 Use ordinary messages for tasks and connector commands for session controls. A command is handled locally; it does not spend a model turn.
 
+Bot messages appear without quoting the message that triggered them. Messages, confirmations and attachments sent within a Matrix thread stay in that thread.
+
 [Back to Riftjack](../README.md)
 
 ## Session controls
@@ -119,7 +121,7 @@ Coding bots accept encrypted Matrix image, file, and audio attachments, includin
 
 Ask a coding bot naturally to send an image, document, or audio file, for example “Send me the report as a PDF” or “Send the WAV file you created.” Each turn provides the agent with a separate outbox and instructions for explicitly attaching its results. The connector sends pictures as `m.image`, supported audio formats (MP3, WAV, OGG/Opus, M4A, AAC, FLAC, WEBA) as `m.audio`, and other formats as `m.file`. SVG is delivered as a file. Ordinary Markdown links and paths in a response do not upload files.
 
-File contents are encrypted before upload. The filename, MIME type, size, and decryption key are delivered inside the encrypted room message. Incoming attachments must also use file encryption and pass integrity verification. Attachments preserve replies and Matrix threads. Access and room membership are checked again before delivery; cancellation stops pending downloads and prevents delivery after an upload completes.
+File contents are encrypted before upload. The filename, MIME type, size, and decryption key are delivered inside the encrypted room message. Incoming attachments must also use file encryption and pass integrity verification. Attachments preserve Matrix threads without quoting the incoming message. Access and room membership are checked again before delivery; cancellation stops pending downloads and prevents delivery after an upload completes.
 
 The default and maximum limit is **512 MiB per attachment** (536,870,912 bytes). Set `MAX_MEDIA_BYTES` to a smaller value if needed. A reply can contain at most 10 files. The homeserver may impose a smaller upload limit. Downloads are bounded by actual bytes, even if the sender omits or understates the size. Attachments sent to the active conversation are downloaded in order and delivered as steering updates, or processed in a follow-up turn if the current task just finished.
 

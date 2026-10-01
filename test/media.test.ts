@@ -45,22 +45,24 @@ function setup(t: { after(fn: () => void): void }, maxBytes = 1024) {
     corrupt: () => { download[0] ^= 1; } };
 }
 
-test('image, audio and document replies upload ciphertext and retain reply/thread relations', async t => {
+test('image, audio and document messages upload ciphertext and preserve threads without reply quotes', async t => {
   const f = setup(t);
   const root = await mediaDirectory(f.dir, 'outgoing', 'conversation');
-  const relation = { rel_type: 'm.thread', event_id: '$root', 'm.in_reply_to': { event_id: '$prompt' } };
+  const thread = { rel_type: 'm.thread', event_id: '$root' };
   for (const [name, data, msgtype, mimetype] of [
     ['picture.png', png, 'm.image', 'image/png'],
     ['sound.wav', Buffer.from('RIFF sound data'), 'm.audio', 'audio/wav'],
     ['report.pdf', Buffer.from('%PDF-1.4 example'), 'm.file', 'application/pdf'],
   ] as const) {
     const path = join(root, name); writeFileSync(path, data);
+    const relation = name === 'report.pdf' ? undefined : thread;
     await f.media.send('!dm:test', [{ root, path }], relation, signal(), async () => {});
     const message = f.messages.at(-1)!;
     assert.equal(message.msgtype, msgtype);
     assert.equal(message.info.mimetype, mimetype);
     assert.equal(message.info.size, data.length);
     assert.deepEqual(message['m.relates_to'], relation);
+    if (!relation) assert.equal(Object.hasOwn(message, 'm.relates_to'), false);
     assert.equal(message.url, undefined);
     assert.notDeepEqual(f.uploads.at(-1), data);
     const decrypted = Attachment.decrypt(new EncryptedAttachment(f.uploads.at(-1)!, JSON.stringify(message.file)));

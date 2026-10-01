@@ -163,11 +163,11 @@ async function main() {
     if (me.user_id !== account.userId || !me.device_id) throw new PublicError('Bot ' + account.userId + ' needs its own device-bound Matrix access token.');
     const authorized = (sender: string) => access.has(sender, account.kind === 'manager' ? undefined : account.userId);
     const privateRoom = (room: string, sender: string) => isPrivateRoom(client, room, account.userId, sender, authorized);
-    const replyRelation = (event: MatrixEvent) => {
+    const threadRelation = (event: MatrixEvent) => {
       const relation = event.content?.['m.relates_to'];
       return relation?.rel_type === 'm.thread'
-        ? { rel_type: 'm.thread', event_id: relation.event_id, is_falling_back: true, 'm.in_reply_to': { event_id: event.event_id } }
-        : { 'm.in_reply_to': { event_id: event.event_id } };
+        ? { rel_type: 'm.thread', event_id: relation.event_id }
+        : undefined;
     };
     let bridge: Bridge | WorkerBridge;
     if (account.kind === 'grok') {
@@ -189,7 +189,7 @@ async function main() {
           const encrypted: unknown[] = [];
           for (const content of contents) {
             await authorize();
-            encrypted.push(await client.crypto.encryptRoomEvent(task.room, 'm.room.message', { ...content, 'm.relates_to': replyRelation(task.event) }));
+            encrypted.push(await client.crypto.encryptRoomEvent(task.room, 'm.room.message', { ...content, 'm.relates_to': threadRelation(task.event) }));
           }
           return encrypted;
         },
@@ -203,7 +203,7 @@ async function main() {
       bridge = new WorkerBridge({ botId: account.userId, authorized, privateRoom, queue, service, state,
         reply: async (room, event, text) => {
           if (!(await privateRoom(room, event.sender!))) throw new PublicError('Worker control reply withheld.');
-          await client.sendMessage(room, { msgtype: 'm.notice', body: text, 'm.relates_to': replyRelation(event) });
+          await client.sendMessage(room, { msgtype: 'm.notice', body: text, 'm.relates_to': threadRelation(event) });
         },
       });
       (client as WorkerMatrixClient).inbox = (room, event) => bridge.handle(room, event);
@@ -292,7 +292,7 @@ async function main() {
         } finally { creating = false; }
       },
       receive: (event, key, signal) => media.receive(event.content!, key, signal),
-      sendAttachments: (room, event, files, signal) => media.send(room, files, replyRelation(event), signal, async () => {
+      sendAttachments: (room, event, files, signal) => media.send(room, files, threadRelation(event), signal, async () => {
         if (!(await privateRoom(room, event.sender!))) throw new PublicError('Attachment withheld because this is no longer an encrypted DM with an allowed account.');
       }),
       async confirmation(room, event, text, controls, markdown) {
@@ -300,7 +300,7 @@ async function main() {
           authorize: async () => {
             if (!(await privateRoom(room, event.sender!))) throw new PublicError('Confirmation withheld because this is no longer an encrypted DM with an allowed account.');
           },
-          sendMessage: content => client.sendMessage(room, { ...content, 'm.relates_to': replyRelation(event) }),
+          sendMessage: content => client.sendMessage(room, { ...content, 'm.relates_to': threadRelation(event) }),
           // Standard Matrix annotations are unencrypted, even in encrypted rooms.
           // Keep only the target event ID and emoji in the reaction payload.
           sendReaction: (eventId, key) => client.sendRawEvent(room, 'm.reaction', {
@@ -310,7 +310,7 @@ async function main() {
         }, markdown);
       },
       async reply(room, event, text, markdown = false) {
-        const replyTo = replyRelation(event);
+        const replyTo = threadRelation(event);
         for (const content of replyContent(text, markdown)) {
           if (!(await privateRoom(room, event.sender!))) throw new PublicError('Reply withheld because this is no longer an encrypted DM with an allowed account.');
           await client.sendMessage(room, { ...content, 'm.relates_to': replyTo });

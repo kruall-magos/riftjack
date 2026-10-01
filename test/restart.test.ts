@@ -113,7 +113,7 @@ test('notification survives replacement, preserves bot/room/thread, and is clear
         encrypt: async (room: string, content: object) => {
           assert.equal(room, target.roomId);
           assert.deepEqual(content, { msgtype: 'm.notice', body: 'Connector restarted.', 'm.relates_to': {
-            rel_type: 'm.thread', event_id: target.threadId, is_falling_back: true, 'm.in_reply_to': { event_id: target.eventId },
+            rel_type: 'm.thread', event_id: target.threadId,
           } });
           return ciphertext;
         },
@@ -139,7 +139,7 @@ test('uncertain delivery retains the same Matrix transaction ID for a deduplicat
     isOwner: () => true, body: 'Started', client: () => ({
       isPrivateRoom: async () => true,
       encrypt: async (_room: string, content: object) => {
-        assert.deepEqual((content as { 'm.relates_to': object })['m.relates_to'], { 'm.in_reply_to': { event_id: target.eventId } });
+        assert.equal(Object.hasOwn(content, 'm.relates_to'), false);
         return { ciphertext: 'encrypted' };
       },
       send: async (_room: string, txn: string) => { transactions.push(txn); if (transactions.length === 1) throw new Error('response lost'); },

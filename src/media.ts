@@ -236,13 +236,13 @@ export class MatrixMedia {
     } finally { await handle.close(); }
   }
 
-  async send(room: string, files: OutgoingAttachment[], relation: object, signal: AbortSignal, authorize: () => Promise<void>): Promise<void> {
+  async send(room: string, files: OutgoingAttachment[], relation: object | undefined, signal: AbortSignal, authorize: () => Promise<void>): Promise<void> {
     if (files.length > MAX_ATTACHMENTS) throw new PublicError(`Send at most ${MAX_ATTACHMENTS} attachments per reply.`);
     for (const file of files) {
       const content = await this.prepareAttachment(file, signal, authorize);
       signal.throwIfAborted();
       await authorize();
-      await this.client.sendMessage(room, { ...content, 'm.relates_to': relation });
+      await this.client.sendMessage(room, { ...content, ...(relation && { 'm.relates_to': relation }) });
     }
   }
 }

@@ -73,9 +73,7 @@ export class RestartNotice {
       this.clear();
       throw new PublicError('Restart notification withheld because access or encrypted DM membership changed.');
     }
-    const relation = !notice.eventId ? undefined : notice.threadId
-      ? { rel_type: 'm.thread', event_id: notice.threadId, is_falling_back: true, 'm.in_reply_to': { event_id: notice.eventId } }
-      : { 'm.in_reply_to': { event_id: notice.eventId } };
+    const relation = notice.threadId ? { rel_type: 'm.thread', event_id: notice.threadId } : undefined;
     const encrypted = await client.encrypt(notice.roomId, { msgtype: 'm.notice',
       body: found.rollback ? found.rollback + '\n\n' + options.body : options.body, ...(relation && { 'm.relates_to': relation }) });
     // Encryption can involve network requests. Recheck access before delivering.
