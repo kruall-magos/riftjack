@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import type { EngineReport } from './bot-status.js';
 
-export type Session = { codex?: string; codexInstructionsHash?: string; claude?: string; grok?: string };
+export type Session = { codex?: string; codexInstructionsHash?: string; claude?: string; grok?: string; codexReport?: EngineReport; claudeReport?: EngineReport };
 type Data = { version: 1; sessions: Record<string, Session>; seen: string[] };
 
 export class State {

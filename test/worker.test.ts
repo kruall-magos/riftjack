@@ -210,3 +210,25 @@ test('cancellation during reply preparation prevents delivery and stale leases c
   await assert.rejects(service.attachment(task.id, task.lease!), /cancelled/);
   service.stop(); queue.close();
 });
+
+test('worker status reports only this conversation queue and does not claim model knowledge', async t => {
+  const dir = directory(t), queue = new WorkerQueue(join(dir, 'queue.sqlite'));
+  const service = new WorkerService(queue, join(dir, 'files'), 100, { allowed: async () => true, receive: async () => undefined,
+    prepare: async () => [], send: async () => {}, report: () => {} });
+  t.after(() => { service.stop(); queue.close(); });
+  const replies: string[] = [];
+  const bridge = new WorkerBridge({ botId: '@grok:test', authorized: sender => sender === '@alice:test', privateRoom: async () => true,
+    queue, service, state: new State(join(dir, 'state.json')), reply: async (_room, _event, text) => { replies.push(text); } });
+  await bridge.handle('!dm:test', event('$work'));
+  await bridge.handle('!elsewhere:test', event('$elsewhere'));
+  await bridge.handle('!dm:test', event('$status', '!status'));
+  assert.match(replies.at(-1)!, /Queued: 1/);
+  assert.match(replies.at(-1)!, /not reported to Riftjack/);
+  const leased = (await service.claim())!;
+  await bridge.handle('!dm:test', event('$status2', '!status'));
+  assert.match(replies.at(-1)!, /Queued: 0.*Leased to a worker: 1/);
+  assert.equal(queue.get(leased.id).status, 'leased');
+  await bridge.handle('!dm:test', event('$status2', '!status'));
+  await bridge.handle('!dm:test', { ...event('$denied', '!status'), sender: '@stranger:test' });
+  assert.equal(replies.length, 2);
+});

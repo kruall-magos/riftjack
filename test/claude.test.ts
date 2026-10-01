@@ -44,7 +44,7 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
   if (started) { record({ response: message }); onResponse?.(message); return; }
   started = true; record({ input: message });
   const prompt = message.message.content[0].text;
-  output({ type: 'system', subtype: 'init', session_id: 'claude-session-1' });
+  output({ type: 'system', subtype: 'init', session_id: 'claude-session-1', ...(prompt.includes('[missing-status]') ? {} : { model: 'resolved-claude', cwd: process.cwd(), permissionMode: 'acceptEdits', fast_mode_state: 'off' }) });
   const finish = result => output({ type: 'result', subtype: 'success', is_error: false, result, session_id: 'claude-session-1' });
   if (prompt.includes('[permission]')) {
     output({ type: 'control_request', request_id: 'perm-1', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: { command: 'touch x', description: 'Create x', timeout: 5 }, decision_reason: 'Outside the sandbox' } });
@@ -149,7 +149,9 @@ test('Claude uses its own login/session and never inherits connector credentials
   const runs = f.calls().filter(call => call.args?.includes('--print'));
   assert.equal(runs.length, 2); assert.ok(!runs[0].args.includes('--resume'));
   assert.equal(runs[1].args[runs[1].args.indexOf('--resume') + 1], 'claude-session-1');
-  assert.deepEqual(new State(join(f.dir, 'state.json')).session('conversation'), { codex: 'existing-codex-thread', claude: 'claude-session-1' });
+  const saved = new State(join(f.dir, 'state.json')).session('conversation');
+  assert.equal(saved.codex, 'existing-codex-thread');
+  assert.equal(saved.claude, 'claude-session-1');
   f.state.reset('conversation');
   assert.deepEqual(f.state.session('conversation'), {});
 });
@@ -380,4 +382,24 @@ test('Claude provisioning creates a separate non-admin Matrix bot', async t => {
   }) as typeof fetch;
   const bot = await provision({ ...f.config, adminToken: 'test-admin' }, 'claude', 'Research', undefined, fake);
   assert.equal(bot.kind, 'claude'); assert.equal(body.admin, false);
+});
+
+test('Claude status uses init metadata, preserves unknowns and clears stale fields on resume', async t => {
+  const f = setup(t);
+  const backend = createBackend({ ...f.config, claudeModel: 'requested-alias' }, f.state);
+  await backend('claude', 'hello', 'key', signal(), '@owner:test');
+  const report = f.state.session('key').claudeReport!;
+  assert.equal(report.model, 'resolved-claude');
+  assert.equal(report.cwd, f.dir);
+  assert.equal(report.permissionMode, 'acceptEdits');
+  assert.equal(report.fastMode, 'off');
+  assert.equal(report.reasoningEffort, undefined);
+  assert.equal(report.serviceTier, undefined);
+  assert.ok(Number.isFinite(Date.parse(report.reportedAt)));
+  assert.equal(f.state.session('another-key').claudeReport, undefined);
+  assert.deepEqual(new State(join(f.dir, 'state.json')).session('key').claudeReport, report);
+  await backend('claude', '[missing-status]', 'key', signal(), '@owner:test');
+  assert.deepEqual(Object.keys(f.state.session('key').claudeReport!), ['reportedAt']);
+  f.state.reset('key');
+  assert.equal(f.state.session('key').claudeReport, undefined);
 });

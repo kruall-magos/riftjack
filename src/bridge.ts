@@ -29,6 +29,7 @@ type Options = {
   receive?: (event: MatrixEvent, key: string, signal: AbortSignal) => Promise<IncomingAttachment>;
   acceptManagerAvatar?: (prompt: string, sender: string) => boolean;
   sendAttachments?: (room: string, event: MatrixEvent, files: OutgoingAttachment[], signal: AbortSignal) => Promise<void>;
+  status?: (key: string) => string;
   // Account usage and limits of the engine.
   usage?: (signal: AbortSignal) => Promise<string>;
   report: (error: unknown) => void;
@@ -71,7 +72,7 @@ export class Bridge {
     if (!prompt || !(await o.isPrivateRoom(room, event.sender)) || !o.isAuthorized(event.sender) || !o.state.claim(event.event_id)) return;
     // Attachments never execute conversation controls. Manager avatar captions are allowed explicitly below.
     const restartSupervisor = !media && /^!restart\s+supervisor$/.test(prompt);
-    const verb = restartSupervisor ? 'restart' : (!media && /^!(help|reset|cancel|restart|usage)$/.exec(prompt)?.[1]) || o.kind;
+    const verb = restartSupervisor ? 'restart' : (!media && /^!(help|reset|cancel|restart|usage|status)$/.exec(prompt)?.[1]) || o.kind;
     const key = sessionKey(room, event);
     const reply = (text: string) => o.reply(room, event, text);
     if (this.stopped || o.isStopping?.()) { await reply('The connector is restarting or stopping. Please retry in a few seconds.'); return; }
@@ -116,6 +117,15 @@ export class Bridge {
       }
     }
     if (verb === 'help') { await o.reply(room, event, help(o.kind), true); return; }
+    if (verb === 'status') {
+      if (!o.status) { await reply('!status is not available for this bot.'); return; }
+      const current = this.active;
+      const task = !current ? 'Idle' : current.key !== key ? 'Busy in another conversation'
+        : current.controller.signal.aborted ? 'Cancelling' : current.running ? 'Running' : 'Preparing or delivering';
+      const queued = current?.key === key ? `\nQueued follow-ups: ${current.followups.length}. Pending updates: ${current.buffered}.` : '';
+      await o.reply(room, event, o.status(key) + `\n\n**Task:** ${task}${queued}`, true);
+      return;
+    }
     // Reads the account's limits without a model request, so it is allowed while a task runs.
     if (verb === 'usage') {
       if (!o.usage) { await reply('!usage is not available for this bot.'); return; }

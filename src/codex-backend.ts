@@ -7,6 +7,7 @@ import { mediaInstructions, outboxDirectory, parseMediaReply, type IncomingAttac
 import { AppServer, RpcError, type AgentMessage, type CodexInput, type Turn } from './app-server.js';
 import { codexInteraction } from './codex-interactions.js';
 import { installPlugin } from './plugins.js';
+import { engineReport } from './bot-status.js';
 
 function deferred<T>() {
   let resolve!: (value: T) => void, reject!: (error: unknown) => void;
@@ -91,9 +92,9 @@ export function createCodexBackend(config: Config, state: State): Backend & { st
           ...(config.codexReasoningEffort ? { model_reasoning_effort: config.codexReasoningEffort } : {}),
         },
       };
-      const thread = await server.request<{ thread: { id: string } }>(saved ? 'thread/resume' : 'thread/start', saved ? { ...options, threadId: saved, excludeTurns: true } : options);
+      const thread = await server.request<{ thread: { id: string }; model?: string; reasoningEffort?: string | null; serviceTier?: string | null; cwd?: string }>(saved ? 'thread/resume' : 'thread/start', saved ? { ...options, threadId: saved, excludeTurns: true } : options);
       current.threadId = thread.thread.id;
-      state.update(key, { codex: current.threadId });
+      state.update(key, { codex: current.threadId, codexReport: engineReport(thread) });
       signal.throwIfAborted();
       // Resume options do not replace developer messages already in model-visible history.
       // Persist a new message only when the connector instructions have changed.

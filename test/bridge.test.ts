@@ -608,3 +608,49 @@ test('task timeout withdraws a pending confirmation and reports timeout instead 
   await f.bridge.handle('!dm:test', event('!approve', '$late'));
   assert.match(f.replies.at(-1)!, /No pending confirmation/);
 });
+
+for (const kind of ['codex', 'claude'] as const) test(`!status (${kind}) is local, scoped and available during a task`, async t => {
+  const started = gate(), finish = gate();
+  const keys: string[] = [];
+  let runs = 0, steers = 0;
+  const f = fixture(t, kind, async () => { runs++; started.release(); await finish.promise; return 'done'; }, true, {
+    status: key => { keys.push(key); return '**Status details**'; },
+    steer: async () => { steers++; return true; },
+  });
+  await f.bridge.handle('!dm:test', event('!status', '$idle'));
+  assert.match(f.replies.at(-1)!, /Task:.*Idle/);
+  assert.equal(runs, 0);
+  const task = f.bridge.handle('!dm:test', event('work', '$work'));
+  await started.promise;
+  try {
+    await f.bridge.handle('!dm:test', event('!status', '$running'));
+    assert.match(f.replies.at(-1)!, /Task:.*Running/);
+    await f.bridge.handle('!elsewhere:test', event('!status', '$elsewhere'));
+    assert.match(f.replies.at(-1)!, /Busy in another conversation/);
+    const threaded = { ...event('!status', '$thread-status'), content: { body: '!status', msgtype: 'm.text', 'm.relates_to': { rel_type: 'm.thread', event_id: '$thread' } } };
+    await f.bridge.handle('!dm:test', threaded);
+    assert.equal(keys.at(-1), sessionKey('!dm:test', threaded));
+    assert.match(f.replies.at(-1)!, /Busy in another conversation/);
+    const count = keys.length;
+    await f.bridge.handle('!dm:test', { ...event('!status', '$unauthorized'), sender: '@stranger:test' });
+    await f.bridge.handle('!dm:test', event('!status extra', '$bad-syntax'));
+    await f.bridge.handle('!dm:test', event('!status', '$running')); // replay
+    assert.equal(keys.length, count);
+    assert.equal(runs, 1);
+    assert.equal(steers, 0);
+  } finally { finish.release(); await task; }
+  await f.bridge.handle('!dm:test', event('!status', '$finished'));
+  assert.match(f.replies.at(-1)!, /Task:.*Idle/);
+});
+
+test('!status respects room privacy and unsupported bots', async t => {
+  let reads = 0;
+  const f = fixture(t, 'codex', undefined, false, { status: () => { reads++; return 'private'; } });
+  await f.bridge.handle('!dm:test', event('!status'));
+  assert.equal(reads, 0);
+  assert.deepEqual(f.replies, []);
+  const manager = fixture(t, 'manager');
+  await manager.bridge.handle('!dm:test', event('!status'));
+  assert.match(manager.replies.at(-1)!, /not available/);
+  assert.deepEqual(manager.calls, []);
+});

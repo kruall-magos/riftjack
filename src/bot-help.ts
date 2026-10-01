@@ -1,5 +1,5 @@
 export function botHelp(kind: 'codex' | 'claude' | 'grok'): string {
-  if (kind === 'grok') return 'Send messages and attachments to the external Grok worker. Use !cancel to cancel queued work or !reset to start a new worker conversation. Use Bot Manager for !restart.';
+  if (kind === 'grok') return 'Send messages and attachments to the external Grok worker. Use !status to see queued work and replies, !cancel to cancel queued work or !reset to start a new worker conversation. Use Bot Manager for !restart.';
   const name = kind === 'codex' ? 'Codex' : 'Claude';
   return [
     `## ${name} · Help`,
@@ -8,7 +8,7 @@ export function botHelp(kind: 'codex' | 'claude' | 'grok'): string {
     '> Inspect the project and explain how to run it.\n>\n> Fix the error in this log and verify the result.\n>\n> Prepare a report and send it as a file.',
     'The bot works in its assigned folder on the connector host. To see workspaces, send `list bots` to **Bot Manager**.',
     '### Basic commands',
-    '- `!help` — show help.\n- `!reset` — start a new conversation in this chat or thread while the bot is idle. Files remain.\n- `!cancel` — stop the task and its queue. Completed changes remain.',
+    '- `!help` — show help.\n- `!status` — show task state, connector settings and the last CLI session report; works during a task.\n- `!reset` — start a new conversation in this chat or thread while the bot is idle. Files remain.\n- `!cancel` — stop the task and its queue. Completed changes remain.',
     '### Updates during work',
     kind === 'codex'
       ? 'Send another message **in the same chat or thread** to update the active task (steering).'

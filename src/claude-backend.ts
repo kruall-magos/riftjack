@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { dirname } from 'node:path';
+import { engineReport } from './bot-status.js';
 import type { Backend, Steer } from './bridge.js';
 import type { Config } from './config.js';
 import type { State } from './state.js';
@@ -176,6 +177,10 @@ export function createClaudeBackend(config: Config, state: State): Backend & { s
           sessionId = message.session_id;
           state.update(key, { claude: sessionId });
         }
+      }
+      if (message.type === 'system' && message.subtype === 'init') {
+        state.update(key, { claudeReport: engineReport({ model: message.model, cwd: message.cwd,
+          reasoningEffort: message.effort, fastMode: message.fast_mode_state, permissionMode: message.permissionMode }) });
       }
       if (message.type === 'control_cancel_request') {
         pending.get(message.request_id)?.abort(); pending.delete(message.request_id);

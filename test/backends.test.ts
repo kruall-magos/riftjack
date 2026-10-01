@@ -49,7 +49,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     if (p.pluginName === 'failure') return send({ id, error: { code: -32603, message: 'Secret diagnostic' } });
     return respond(id, { authPolicy: 'ON_USE', appsNeedingAuth: [{ name: 'GitHub', installUrl: 'https://github.test/login' }] });
   }
-  if (method === 'thread/start' || method === 'thread/resume') { instructions = p.developerInstructions; return respond(id, { thread: { id: threadId } }); }
+  if (method === 'thread/start' || method === 'thread/resume') { instructions = p.developerInstructions; return respond(id, { thread: { id: threadId }, model: 'resolved-model', reasoningEffort: 'medium', serviceTier: 'default', cwd: process.cwd() }); }
   if (method === 'thread/inject_items') {
     if (fs.existsSync(path.join(__dirname, 'reject-instructions'))) return send({ id, error: { code: -32603, message: 'Test injection failure' } });
     instructions = p.items[0].content[0].text;
@@ -620,4 +620,23 @@ test('failed plugin installation reports uncertain state without retrying or cla
   assert.equal(f.calls().filter(c => c.method === 'plugin/install').length, 1);
   assert.match(f.replies.at(-1)!, /installation was not confirmed/);
   assert.doesNotMatch(f.replies.at(-1)!, /Secret diagnostic/);
+});
+
+test('Codex status records CLI-reported values, refreshes on resume and stays conversation-scoped', async t => {
+  const f = setup(t);
+  const backend = createBackend({ ...f.config, codexModel: 'requested-alias', codexReasoningEffort: 'high', codexServiceTier: 'priority' }, f.state);
+  await backend('codex', 'hello', 'key', signal(), '@owner:test');
+  const report = f.state.session('key').codexReport!;
+  assert.equal(report.model, 'resolved-model');
+  assert.equal(report.reasoningEffort, 'medium');
+  assert.equal(report.serviceTier, 'default');
+  assert.equal(report.cwd, realpathSync(f.dir));
+  assert.ok(Number.isFinite(Date.parse(report.reportedAt)));
+  assert.equal(f.state.session('another-key').codexReport, undefined);
+  assert.deepEqual(new State(join(f.dir, 'sessions.json')).session('key').codexReport, report);
+  f.state.update('key', { codexReport: { reportedAt: report.reportedAt, model: 'outdated' } });
+  await backend('codex', 'again', 'key', signal(), '@owner:test');
+  assert.equal(f.state.session('key').codexReport!.model, 'resolved-model');
+  f.state.reset('key');
+  assert.equal(f.state.session('key').codexReport, undefined);
 });

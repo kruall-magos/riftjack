@@ -102,7 +102,7 @@ attached; their **combined** size must fit `MAX_MEDIA_BYTES` (512 MiB by default
 Audio transcription is the worker's responsibility. The API accepts file bytes,
 never paths to files on the connector host.
 
-In the Grok DM, `!status` shows queued work, active leases and pending replies. `!cancel` cancels queued tasks and leases for that conversation;
+In the Grok DM, `!status` shows queued work, active leases and pending replies. Model settings and the worker workspace are explicitly marked as unreported; the connector does not infer them from the bot name. `!cancel` cancels queued tasks and leases for that conversation;
 `!reset` also assigns a new conversation ID. Replies from cancelled leases are
 rejected. The remote worker must cooperate by observing lease renewal failures;
 Riftjack cannot kill a process on another computer or undo completed actions.

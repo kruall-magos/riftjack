@@ -37,7 +37,7 @@ export class WorkerBridge {
         const queued = tasks.filter(task => task.status === 'queued' || (task.status === 'leased' && task.leaseUntil! <= Date.now())).length;
         const working = tasks.filter(task => task.status === 'leased' && task.leaseUntil! > Date.now()).length;
         const sending = tasks.filter(task => task.status === 'replied').length;
-        await o.reply(room, event, `Queued: ${queued}. Leased to a worker: ${working}. Replies awaiting delivery: ${sending}.`);
+        await o.reply(room, event, `Grok · external worker\nModel, reasoning, speed and workspace: managed by the worker; not reported to Riftjack.\nQueued: ${queued}. Leased to a worker: ${working}. Replies awaiting delivery: ${sending}.`);
       } else {
         o.queue.cancel(command.id);
         await o.reply(room, event, 'Send text, images, files or audio to the connected Grok worker. Messages are queued durably, including while it is offline.\n!status — show queued work and replies.\n!cancel — cancel this conversation’s queued work.\n!reset — start a new worker conversation.\nThe worker handles its own model context and tool permissions. Use Bot Manager for !restart.');
