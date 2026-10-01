@@ -158,12 +158,12 @@ test('resuming a Codex conversation explicitly refreshes the attachment limit', 
   const f = setup(t);
   const first = createBackend({ ...f.config, maxMediaBytes: 20 * 1024 * 1024 }, f.state);
   await first('codex', 'hello', 'key', signal(), '@owner:test');
-  const next = createBackend({ ...f.config, maxMediaBytes: 1024 ** 3 }, f.state);
+  const next = createBackend({ ...f.config, maxMediaBytes: 512 * 1024 ** 2 }, f.state);
   await next('codex', '[attachment]', 'key', signal(), '@owner:test');
   const start = f.calls().find(c => c.method === 'thread/start').params;
   const resume = f.calls().find(c => c.method === 'thread/resume').params;
   assert.match(start.developerInstructions, /20971520 bytes each/);
-  assert.match(resume.developerInstructions, /1073741824 bytes each/);
+  assert.match(resume.developerInstructions, /536870912 bytes each/);
   assert.equal(resume.threadId, 'thread_1');
   assert.equal(resume.config.developer_instructions, undefined);
   const calls = f.calls();
@@ -172,11 +172,11 @@ test('resuming a Codex conversation explicitly refreshes the attachment limit', 
   assert.ok(index < calls.map(c => c.method).lastIndexOf('turn/start'));
   const item = calls[index].params.items[0];
   assert.equal(item.role, 'developer');
-  assert.match(item.content[0].text, /1073741824 bytes each/);
+  assert.match(item.content[0].text, /536870912 bytes each/);
   assert.doesNotMatch(item.content[0].text, /20971520/);
   assert.ok(f.state.session('key').codexInstructionsHash);
   // A new backend and State instance exercise persistence across connector restarts.
-  const reloaded = createBackend({ ...f.config, maxMediaBytes: 1024 ** 3 }, new State(join(f.dir, 'sessions.json')));
+  const reloaded = createBackend({ ...f.config, maxMediaBytes: 512 * 1024 ** 2 }, new State(join(f.dir, 'sessions.json')));
   await reloaded('codex', 'again', 'key', signal(), '@owner:test');
   assert.equal(f.calls().filter(c => c.method === 'thread/inject_items').length, 1);
 });
