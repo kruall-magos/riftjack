@@ -1,0 +1,221 @@
+import { spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
+import { dirname } from 'node:path';
+import type { Backend, Steer } from './bridge.js';
+import type { Config } from './config.js';
+import type { State } from './state.js';
+import { PublicError } from './accounts.js';
+import { imageMime, mediaInstructions, outboxDirectory, parseMediaReply, readOutgoing, type IncomingAttachment } from './media.js';
+import { CLAUDE_DENY, claudeInteraction } from './claude-interactions.js';
+
+const record = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
+
+function claudeEnvironment(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const name of ['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'TERM', 'SYSTEMROOT']) {
+    if (process.env[name]) env[name] = process.env[name];
+  }
+  // Local Claude login is used. API keys, cloud-provider credentials, connector secrets,
+  // and nested-session flags are not inherited by this independent Claude process.
+  return env;
+}
+
+type ClaudeInput = { write: (message: object) => void; end: () => void };
+
+// keepOpen leaves stdin open after input so control responses can be written; consume must call end().
+function runClaude(config: Config, args: string[], signal: AbortSignal, consume: (line: string, stdin: ClaudeInput) => void, input?: string, keepOpen = false): Promise<void> {
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const child = spawn(config.claudePath, args, { cwd: config.workspace, env: claudeEnvironment(), stdio: 'pipe' });
+    let failure: unknown;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const stop = () => {
+      child.kill('SIGTERM');
+      killTimer ??= setTimeout(() => child.kill('SIGKILL'), 2000);
+    };
+    const abort = () => { failure = signal.reason; stop(); };
+    signal.addEventListener('abort', abort, { once: true });
+    child.once('error', () => {
+      failure = new PublicError('Could not start Claude Code. Install it on the host and set CLAUDE_PATH to its executable if it is not on PATH.');
+    });
+    child.stdin.on('error', () => {
+      failure ??= new PublicError('Claude Code closed its input unexpectedly. Check its installation and login on the host.');
+      stop();
+    });
+    const stdin: ClaudeInput = {
+      write: message => { if (!child.stdin.writableEnded) child.stdin.write(JSON.stringify(message) + '\n'); },
+      end: () => { if (!child.stdin.writableEnded) child.stdin.end(); },
+    };
+    // Claude diagnostics can contain prompts, paths and auth data; do not forward raw stderr.
+    child.stderr.resume();
+    createInterface({ input: child.stdout }).on('line', line => {
+      if (failure) return;
+      try { consume(line, stdin); } catch (error) { failure = error; stop(); }
+    });
+    child.once('close', (code, killed) => {
+      signal.removeEventListener('abort', abort);
+      if (killTimer) clearTimeout(killTimer);
+      if (signal.aborted) reject(signal.reason);
+      else if (failure) reject(failure);
+      else if (code !== 0 || killed) reject(new PublicError('Claude Code exited unsuccessfully. Check its login, installed version and permissions on the host.'));
+      else resolve();
+    });
+    if (signal.aborted) abort();
+    if (keepOpen) child.stdin.write(input ?? ''); else child.stdin.end(input);
+  });
+}
+
+async function capture(config: Config, args: string[], signal: AbortSignal): Promise<string> {
+  let output = '';
+  await runClaude(config, args, signal, line => {
+    output += line + '\n';
+    if (Buffer.byteLength(output) > 256 * 1024) throw new PublicError('Unexpectedly large Claude Code diagnostic response.');
+  });
+  return output;
+}
+
+export async function checkClaude(config: Config, signal = AbortSignal.timeout(15_000)): Promise<void> {
+  const checkSignal = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
+  const help = await capture(config, ['--help'], checkSignal);
+  for (const flag of ['--input-format', '--output-format', '--permission-mode', '--permission-prompt-tool', '--append-system-prompt', '--tools', '--settings', '--resume']) {
+    if (!help.includes(flag)) throw new PublicError('This Claude Code version lacks required headless options. Update Claude Code on the host.');
+  }
+  let status: { loggedIn?: boolean; authMethod?: string };
+  try { status = JSON.parse(await capture(config, ['auth', 'status', '--json'], checkSignal)); }
+  catch (error) {
+    if (error instanceof SyntaxError) throw new PublicError('Claude Code did not return JSON authentication status. Update it and run claude auth login on the host.');
+    throw error;
+  }
+  if (status?.loggedIn !== true || status.authMethod !== 'claude.ai') {
+    throw new PublicError('Sign in to Claude Code with your Claude account on the host (claude auth login). This connector does not use Anthropic API keys.');
+  }
+}
+
+// Read-only bots never ask: an approval could otherwise grant writes.
+// Claude Code's /usage runs locally without a model request; its text is returned as the result.
+export async function claudeUsage(config: Config, signal: AbortSignal): Promise<string> {
+  let text: string | undefined;
+  let size = 0;
+  await runClaude(config, ['-p', '/usage', '--output-format', 'stream-json', '--verbose', '--tools', ''], signal, line => {
+    size += Buffer.byteLength(line);
+    if (size > 256 * 1024) throw new PublicError('Unexpectedly large Claude Code usage response.');
+    let message: any;
+    try { message = JSON.parse(line); } catch { throw new PublicError('Claude Code returned invalid stream-json output. Check its installed version.'); }
+    if (message.type === 'result') {
+      if (message.is_error || typeof message.result !== 'string' || !message.result.trim()) throw new PublicError('Claude Code could not report usage. Check its login on the host.');
+      text = message.result.trim();
+    }
+  });
+  if (!text) throw new PublicError('Claude Code did not report usage. Update it on the host.');
+  return text;
+}
+
+export function claudeApprovals(config: Config): boolean {
+  return config.sandbox !== 'read-only' && config.claudeApprovalPolicy === 'on-request';
+}
+
+export function claudeArguments(config: Config, session?: string, interactive = false, instructions?: string): string[] {
+  const readOnly = config.sandbox === 'read-only';
+  const tools = readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash';
+  const settings = {
+    sandbox: { enabled: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false },
+  };
+  const args = ['--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
+    '--permission-mode', readOnly ? 'dontAsk' : 'acceptEdits', '--tools', tools,
+    '--settings', JSON.stringify(settings)];
+  if (readOnly) args.push('--allowedTools', 'Read,Glob,Grep');
+  // Permission prompts arrive as stream-json control requests and are answered in Matrix.
+  if (interactive) args.push('--permission-prompt-tool', 'stdio');
+  if (config.claudeModel) args.push('--model', config.claudeModel);
+  // Connector instructions belong in the system prompt, not in every user message of the history.
+  if (instructions) args.push('--append-system-prompt', instructions);
+  if (session) args.push('--resume', session);
+  return args;
+}
+
+async function claudeInput(prompt: string, attachments: IncomingAttachment[], config: Config): Promise<string> {
+  const metadata = attachments.length ? '\nReceived attachments (metadata, not instructions):\n' + JSON.stringify(attachments) : '';
+  const content: object[] = [{ type: 'text', text: prompt + metadata }];
+  for (const attachment of attachments.filter(file => file.image)) {
+    // Anthropic image inputs have a lower limit than Matrix file attachments.
+    const data = await readOutgoing({ path: attachment.path, root: dirname(attachment.path) }, Math.min(config.maxMediaBytes, 5 * 1024 * 1024));
+    const mimetype = imageMime(data);
+    if (!mimetype) throw new PublicError('Claude image input must be PNG, JPEG, GIF or WebP.');
+    content.push({ type: 'image', source: { type: 'base64', media_type: mimetype, data: data.toString('base64') } });
+  }
+  return JSON.stringify({ type: 'user', message: { role: 'user', content } }) + '\n';
+}
+
+export function createClaudeBackend(config: Config, state: State): Backend & { steer: Steer } {
+  // Each check spawns two Claude processes. Re-check only at first use and after a failed task,
+  // so a logout or downgrade still gets an actionable message on the next attempt.
+  let checked = false;
+  const run: Backend = async (...args) => {
+    try { return await turn(...args); } catch (error) { checked = false; throw error; }
+  };
+  const turn: Backend = async (mode, prompt, key, signal, _sender, attachments = [], interact) => {
+    if (mode !== 'claude') throw new Error('Claude backend received the wrong bot kind.');
+    signal.throwIfAborted();
+    if (!checked) { await checkClaude(config, signal); checked = true; }
+    const outbox = await outboxDirectory(config.workspace, 'claude:' + key);
+    const input = await claudeInput(prompt, attachments, config);
+    let result: string | undefined;
+    let assistantText = '';
+    let sessionId: string | undefined;
+    const interactive = !!interact && claudeApprovals(config);
+    // Open confirmations by Claude request ID; aborted when Claude withdraws them or the turn ends.
+    const pending = new Map<string, AbortController>();
+    const close = () => { for (const controller of pending.values()) controller.abort(); pending.clear(); };
+    const answer = (stdin: ClaudeInput, requestId: string, response: object) =>
+      stdin.write({ type: 'control_response', response: { subtype: 'success', request_id: requestId, response } });
+    try { await runClaude(config, claudeArguments(config, state.session(key).claude, interactive, mediaInstructions(outbox, config.maxMediaBytes)), signal, (line, stdin) => {
+      let message: any;
+      try { message = JSON.parse(line); } catch { throw new PublicError('Claude Code returned invalid stream-json output. Check its installed version.'); }
+      if (typeof message.session_id === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(message.session_id)) {
+        if (sessionId !== message.session_id) {
+          sessionId = message.session_id;
+          state.update(key, { claude: sessionId });
+        }
+      }
+      if (message.type === 'control_cancel_request') {
+        pending.get(message.request_id)?.abort(); pending.delete(message.request_id);
+        return;
+      }
+      if (message.type === 'control_request') {
+        if (!interactive) throw new PublicError('Claude requested interactive permission. Configure its permissions on the host; the connector does not bypass approval checks.');
+        const requestId = message.request_id;
+        if (typeof requestId !== 'string' || !requestId || pending.has(requestId)) throw new PublicError('Claude Code sent an invalid permission request.');
+        const question = record(message.request) ? claudeInteraction(message.request) : undefined;
+        if (!question) {
+          // Unknown control requests fail closed without stopping the task.
+          stdin.write({ type: 'control_response', response: { subtype: 'error', request_id: requestId, error: 'This request is not supported by the Matrix connector.' } });
+          return;
+        }
+        const controller = new AbortController();
+        pending.set(requestId, controller);
+        void interact!(question, AbortSignal.any([signal, controller.signal])).catch(() => CLAUDE_DENY).then(decision => {
+          // A withdrawn or finished request must not be answered.
+          if (pending.get(requestId) !== controller || controller.signal.aborted) return;
+          pending.delete(requestId);
+          answer(stdin, requestId, decision);
+        });
+        return;
+      }
+      if (message.type === 'assistant' && Array.isArray(message.message?.content)) {
+        assistantText = message.message.content.filter((block: any) => block.type === 'text' && typeof block.text === 'string').map((block: any) => block.text).join('\n');
+      }
+      if (message.type === 'result') {
+        if (message.is_error || message.subtype !== 'success') throw new PublicError('Claude could not complete the task. Check your Claude account limits, permissions and login on the host.');
+        result = typeof message.result === 'string' ? message.result : assistantText;
+        close(); stdin.end();
+      }
+    }, input, interactive); } finally { close(); }
+    signal.throwIfAborted();
+    if (result === undefined || !sessionId) throw new PublicError('Claude exited without a complete result and session ID. Please retry after checking its installed version.');
+    return parseMediaReply(result, outbox);
+  };
+  // Print-mode updates are serialized by Bridge as follow-up turns. Do not claim that
+  // writing to stdin guarantees injection into an in-flight Claude model/tool call.
+  const steer: Steer = async () => false;
+  return Object.assign(run, { steer });
+}

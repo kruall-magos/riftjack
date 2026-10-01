@@ -1,0 +1,77 @@
+# Dependencies and generated files
+node_modules/
+__pycache__/
+*.py[cod]
+coverage/
+.DS_Store
+
+# Instance configuration: only the sanitized template belongs in Git.
+.env
+.env.*
+*.env
+*.env.*
+!.env.example
+.npmrc
+.netrc
+
+# Runtime state contains tokens, Matrix identities, conversations and attachments.
+data/
+.matrix-media/
+.connector-history/
+accounts.json
+allowed-users.json
+sessions.json
+bot-dms.json
+restart-notice.json
+matrix.json
+crypto/
+auth.json
+credentials.json
+tokens.json
+device-recovery.json
+# User-provided avatars belong with instance data, even if copied here by mistake.
+/assets/avatars/
+*.sqlite*
+*.db
+*.db-*
+*.log
+*.pid
+
+# Local agent/editor/cloud settings may contain credentials and personal paths.
+.claude/
+.claude.json
+.codex/
+.agents/
+.ssh/
+.aws/
+.config/
+.vscode/
+.idea/
+
+# Keys, certificates and exports (including public keys identifying an instance).
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.pub
+id_rsa*
+id_ed25519*
+id_ecdsa*
+id_dsa*
+*_ed25519*
+authorized_keys
+known_hosts*
+
+# Copies and archives can carry secrets even when the originals are ignored.
+*.bak
+*.backup
+*.old
+*.orig
+*.swp
+*.swo
+*~
+*.zip
+*.tar
+*.tar.gz
+*.tgz

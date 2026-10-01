@@ -1,0 +1,212 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import { WorkerQueue } from '../src/worker-queue.js';
+import { WorkerService } from '../src/worker-service.js';
+import { WorkerServer } from '../src/worker-server.js';
+import { WorkerBridge } from '../src/worker-bridge.js';
+import { WorkerMatrixClient } from '../src/worker-matrix-client.js';
+import { SimpleFsStorageProvider } from '@vector-im/matrix-bot-sdk';
+import { State } from '../src/state.js';
+import { parseManagerRequest } from '../src/accounts.js';
+import { loadConfig } from '../src/config.js';
+
+const event = (id = '$one', body = 'hello') => ({ type: 'm.room.message', event_id: id, sender: '@alice:test', origin_server_ts: 1000, content: { msgtype: 'm.text', body } });
+function directory(t: { after(fn: () => void): void }) {
+  const dir = mkdtempSync(join(tmpdir(), 'riftjack-worker-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true })); return dir;
+}
+const idle = async (service: WorkerService) => { while (service.busy) await new Promise(resolve => setTimeout(resolve, 1)); };
+
+test('durable inbox deduplicates events, leases exclusively, and rejects stale results after restart', t => {
+  const dir = directory(t), file = join(dir, 'queue.sqlite'); let now = 1000;
+  let queue = new WorkerQueue(file, () => now, 100);
+  const control = queue.enqueue('!dm:test', event('$control', '!cancel'), 'conversation', true);
+  assert.equal(queue.candidate(), undefined);
+  const original = queue.enqueue('!dm:test', event(), 'conversation');
+  assert.equal(queue.enqueue('!dm:test', event(), 'conversation').id, original.id);
+  const a = queue.claim(original.id)!; assert.equal(queue.candidate(), undefined);
+  assert.equal(queue.claim(original.id), undefined);
+  queue.close(); queue = new WorkerQueue(file, () => now, 100);
+  assert.equal(queue.candidate(), undefined);
+  assert.equal(queue.get(control.id).status, 'control');
+  now += 101;
+  const b = queue.claim(original.id)!;
+  assert.notEqual(a.lease, b.lease); assert.equal(b.attempt, 2);
+  assert.throws(() => queue.complete(a.id, a.lease!, 'old reply', []), /Lease expired/);
+  assert.equal(queue.complete(b.id, b.lease!, 'reply', []).status, 'replied');
+  assert.equal(queue.complete(b.id, b.lease!, 'reply', []).status, 'replied');
+  assert.throws(() => queue.complete(b.id, b.lease!, 'changed', []), /different reply/);
+  queue.close();
+});
+
+test('renewal, release and cancellation persist, and cancellation invalidates an active lease', t => {
+  const queue = new WorkerQueue(join(directory(t), 'queue.sqlite'), () => 1000, 100);
+  const a = queue.claim(queue.enqueue('!dm:test', event(), 'c').id)!;
+  assert.equal(queue.renew(a.id, a.lease!).leaseUntil, 1100);
+  queue.release(a.id, a.lease!);
+  const b = queue.claim(a.id)!;
+  assert.notEqual(b.lease, a.lease);
+  queue.cancelWhere(task => task.conversation === 'c');
+  assert.throws(() => queue.renew(b.id, b.lease!), /cancelled/);
+  assert.equal(queue.candidate(), undefined); queue.close();
+});
+
+test('accepted replies survive restart and lost Matrix send responses reuse the same encrypted event and transaction', async t => {
+  const dir = directory(t), file = join(dir, 'queue.sqlite');
+  let queue = new WorkerQueue(file); let prepared = 0, failed = false;
+  const sends = new Map<string, unknown>(), attempts: string[] = [];
+  const transport = {
+    allowed: async () => true, receive: async () => undefined,
+    prepare: async () => { prepared++; return [{ ciphertext: 'fixed' }]; },
+    send: async (_task: unknown, transaction: string, encrypted: unknown) => {
+      attempts.push(transaction); sends.set(transaction, encrypted);
+      if (!failed) { failed = true; throw new Error('response lost after server accepted event'); }
+    }, report: () => {},
+  };
+  let service = new WorkerService(queue, join(dir, 'files'), 100, transport);
+  const task = queue.claim(queue.enqueue('!dm:test', event(), 'c').id)!;
+  await service.complete(task.id, task.lease!, { text: 'reply' }); await idle(service);
+  assert.equal(queue.get(task.id).status, 'replied');
+  service.stop(); queue.close();
+  queue = new WorkerQueue(file); service = new WorkerService(queue, join(dir, 'files'), 100, transport);
+  await service.deliver();
+  assert.equal(prepared, 1); assert.equal(sends.size, 1);
+  assert.equal(attempts[0], attempts[1]); assert.equal(queue.get(task.id).status, 'delivered');
+  await service.complete(task.id, task.lease!, { text: 'reply' }); await idle(service);
+  assert.equal(attempts.length, 2); service.stop(); queue.close();
+});
+
+test('privacy and revocation block worker claims, attachments and reply delivery', async t => {
+  const dir = directory(t), queue = new WorkerQueue(join(dir, 'queue.sqlite')); let allowed = true;
+  const service = new WorkerService(queue, join(dir, 'files'), 100, {
+    allowed: async () => allowed, receive: async () => { allowed = false; return undefined; },
+    prepare: async () => assert.fail('Private data must not be sent'), send: async () => assert.fail('No send'), report: () => {},
+  });
+  const task = queue.enqueue('!dm:test', event(), 'c');
+  allowed = false; assert.equal(await service.claim(), null); assert.equal(queue.get(task.id).status, 'cancelled');
+  allowed = true; queue.enqueue('!dm:test', event('$two'), 'c');
+  const next = (await service.claim())!;
+  await assert.rejects(service.attachment(next.id, next.lease!), /privacy changed/);
+  await assert.rejects(service.complete(next.id, next.lease!, { text: 'secret' }), /privacy changed/);
+  service.stop(); queue.close();
+});
+
+test('Grok room messages are durable and reset changes conversation identity while cancelling old leases', async t => {
+  const dir = directory(t), queue = new WorkerQueue(join(dir, 'queue.sqlite'));
+  const service = new WorkerService(queue, join(dir, 'files'), 100, { allowed: async () => true, receive: async () => undefined,
+    prepare: async () => [], send: async () => {}, report: () => {} });
+  const replies: string[] = [];
+  const bridge = new WorkerBridge({ botId: '@grok:test', authorized: sender => sender === '@alice:test', privateRoom: async () => true,
+    queue, service, state: new State(join(dir, 'state.json')), reply: async (_room, _event, text) => { replies.push(text); } });
+  await bridge.handle('!dm:test', event()); await bridge.handle('!dm:test', event());
+  const a = (await service.claim())!;
+  await bridge.handle('!dm:test', { ...event('$other'), sender: '@stranger:test' });
+  await bridge.handle('!dm:test', event('$reset', '!reset'));
+  assert.equal(queue.get(a.id).status, 'cancelled');
+  await bridge.handle('!dm:test', event('$next'));
+  const b = (await service.claim())!; assert.notEqual(a.conversation, b.conversation);
+  assert.equal(queue.list().some(task => task.event.sender === '@stranger:test'), false);
+  assert.equal(replies.length, 1); bridge.stop(); queue.close();
+});
+
+test('worker HTTP API authenticates per bot, supports long polling, and validates replies', async t => {
+  const dir = directory(t), queue = new WorkerQueue(join(dir, 'queue.sqlite'));
+  const service = new WorkerService(queue, join(dir, 'files'), 10, { allowed: async () => true, receive: async () => undefined,
+    prepare: async task => [{ text: task.response!.text }], send: async () => {}, report: () => {} });
+  const server = new WorkerServer(); server.add('@grok:test', 'a'.repeat(43), service);
+  const port = await server.start(0);
+  t.after(async () => { service.stop(); await server.stop(); queue.close(); });
+  const base = `http://127.0.0.1:${port}/v1/bots/%40grok%3Atest/tasks`;
+  const request = (path = '', body?: object, token = 'a'.repeat(43)) => fetch(base + path, {
+    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+    ...(body && { method: 'POST', body: JSON.stringify(body) }),
+  });
+  assert.equal((await request('', undefined, 'b'.repeat(43))).status, 401);
+  assert.equal((await fetch(base.replace('grok', 'other'), { headers: { Authorization: 'Bearer ' + 'a'.repeat(43) } })).status, 401);
+  const waiting = request('?wait=2');
+  setTimeout(() => queue.enqueue('!dm:test', event(), 'c'), 20);
+  const task = (await (await waiting).json()).task;
+  assert.ok(task.id); assert.equal(task.text, 'hello');
+  assert.deepEqual(await (await request()).json(), { task: null });
+  assert.equal((await request('/' + task.id + '/reply', { lease: 'wrong', text: 'reply' })).status, 409);
+  assert.equal((await request('/' + task.id + '/reply', { lease: task.lease, files: [{ name: 'x', data: Buffer.alloc(11).toString('base64') }] })).status, 413);
+  assert.equal((await request('/' + task.id + '/reply', { lease: task.lease, text: 'reply' })).status, 200);
+  await idle(service);
+  assert.equal((await (await request('/' + task.id)).json()).status, 'delivered');
+  assert.equal((await request('/' + task.id + '/reply', { lease: task.lease, text: 'different' })).status, 409);
+  const tokenFile = join(dir, 'token'), taskFile = join(dir, 'task.json'), replyFile = join(dir, 'reply.txt');
+  writeFileSync(tokenFile, 'a'.repeat(43), { mode: 0o600 }); writeFileSync(replyFile, 'reply from CLI');
+  queue.enqueue('!dm:test', event('$cli'), 'c');
+  const cli = (...args: string[]) => promisify(execFile)('python3', [fileURLToPath(new URL('../scripts/worker-client.py', import.meta.url)),
+    '--url', `http://127.0.0.1:${port}`, '--bot', '@grok:test', '--token-file', tokenFile, ...args]);
+  const claimed = JSON.parse((await cli('wait', '--seconds', '1')).stdout);
+  assert.equal(claimed.text, 'hello'); writeFileSync(taskFile, JSON.stringify(claimed));
+  assert.ok(JSON.parse((await cli('renew', taskFile)).stdout).leaseUntil);
+  assert.equal(JSON.parse((await cli('reply', taskFile, '--text-file', replyFile)).stdout).status, 'replied');
+  await idle(service);
+  assert.equal(JSON.parse((await cli('status', taskFile)).stdout).status, 'delivered');
+});
+
+test('worker sync checkpoints only after inbox commit and retains the old checkpoint on failure', async t => {
+  for (const fail of [false, true]) {
+    const file = join(directory(t), 'matrix.json'), storage = new SimpleFsStorageProvider(file);
+    storage.setSyncToken('previous');
+    class Client extends WorkerMatrixClient {
+      run() { return this.startSyncInternal(); }
+      protected override async doSync() { return { next_batch: 'next' }; }
+      protected override async processSync(_raw: any, emit: any) { await emit('room.message', '!dm:test', event()); this.stop(); }
+    }
+    const client = new Client('https://matrix.test', 'synthetic-token', storage);
+    let fatal = false; client.on('worker.inbox_failure', () => { fatal = true; });
+    client.inbox = async () => {
+      assert.equal(storage.getSyncToken(), 'previous');
+      if (fail) throw new Error('disk unavailable');
+    };
+    await client.run();
+    // The SDK starts its sync loop in the background. Let the first batch finish.
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(fatal, fail); assert.equal(storage.getSyncToken(), fail ? 'previous' : 'next');
+  }
+});
+
+test('Grok provisioning syntax and disabled-by-default worker port are explicit', () => {
+  assert.deepEqual(parseManagerRequest('create a Grok bot called Research'), { action: 'create', kind: 'grok', name: 'Research' });
+  const env = { MATRIX_HOMESERVER: 'https://matrix.test', MATRIX_OWNER_ID: '@alice:test', RIFTJACK_WORKSPACE: process.cwd() };
+  assert.equal(loadConfig(env).workerPort, 0);
+  assert.equal(loadConfig({ ...env, WORKER_PORT: '8788' }).workerPort, 8788);
+  assert.throws(() => loadConfig({ ...env, WORKER_PORT: '65536' }), /WORKER_PORT/);
+});
+
+test('worker file replies store bytes under controlled names and never accept connector file paths', async t => {
+  const dir = directory(t), queue = new WorkerQueue(join(dir, 'queue.sqlite'));
+  let preparedFile = '';
+  const service = new WorkerService(queue, join(dir, 'files'), 100, { allowed: async () => true, receive: async () => undefined,
+    prepare: async task => { preparedFile = task.response!.files[0].path; return [{ ciphertext: 'attachment' }]; }, send: async () => {}, report: () => {} });
+  const task = queue.claim(queue.enqueue('!dm:test', event(), 'c').id)!;
+  await assert.rejects(service.complete(task.id, task.lease!, { files: [{ name: 'secrets', path: '/etc/passwd' }] }), /base64/);
+  await service.complete(task.id, task.lease!, { files: [{ name: '../report.txt', data: Buffer.from('report').toString('base64') }] });
+  await idle(service);
+  assert.equal(queue.get(task.id).response!.files[0].name, 'report.txt');
+  assert.equal(readFileSync(preparedFile, 'utf8'), 'report'); assert.ok(preparedFile.startsWith(join(dir, 'files') + '/'));
+  assert.equal(queue.get(task.id).status, 'delivered'); service.stop(); queue.close();
+});
+
+test('cancellation during reply preparation prevents delivery and stale leases cannot access attachments', async t => {
+  const dir = directory(t), queue = new WorkerQueue(join(dir, 'queue.sqlite'));
+  let service: WorkerService;
+  service = new WorkerService(queue, join(dir, 'files'), 100, { allowed: async () => true,
+    receive: async () => assert.fail('Cancelled attachment must not be read'),
+    prepare: async task => { queue.cancel(task.id); return [{ ciphertext: 'cancelled' }]; },
+    send: async () => assert.fail('Cancelled reply must not be sent'), report: () => {} });
+  const task = queue.claim(queue.enqueue('!dm:test', event(), 'c').id)!;
+  await service.complete(task.id, task.lease!, { text: 'reply' }); await idle(service);
+  assert.equal(queue.get(task.id).status, 'cancelled');
+  await assert.rejects(service.attachment(task.id, task.lease!), /cancelled/);
+  service.stop(); queue.close();
+});

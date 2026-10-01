@@ -1,0 +1,36 @@
+name: Commit policy
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+permissions:
+  contents: read
+jobs:
+  commit-messages:
+    runs-on: ubuntu-latest
+    steps:
+      # Use the policy from the target branch, not the proposed implementation.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: true # Read-only token, needed to fetch PR refs in private repositories.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Check all proposed commit messages and squash title/body
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          git fetch --no-tags origin "refs/pull/$PR_NUMBER/head"
+          node scripts/check-commit-message.mjs --range "$BASE_SHA..$HEAD_SHA"
+          node --input-type=module - <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { violations } from './scripts/check-commit-message.mjs';
+          const { pull_request: pr } = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
+          if (violations(pr.title + '\n\n' + (pr.body || '')).length) {
+            console.error('Remove AI attribution from the PR title/body before using it as a squash commit message.');
+            process.exit(1);
+          }
+          JS

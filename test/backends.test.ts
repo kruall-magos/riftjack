@@ -1,0 +1,521 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, realpathSync, readFileSync, rmSync, writeFileSync, existsSync, copyFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, delimiter } from 'node:path';
+import { createBackend } from '../src/backends.js';
+import { loadConfig } from '../src/config.js';
+import { State } from '../src/state.js';
+import type { BackendReply } from '../src/media.js';
+import { Bridge, type MatrixEvent } from '../src/bridge.js';
+import { configForWorkspace } from '../src/workspace.js';
+import { codexUsage } from '../src/codex-usage.js';
+
+function setup(t: { after(fn: () => void): void }, accountType = 'chatgpt') {
+  const dir = mkdtempSync(join(tmpdir(), 'matrix-app-server-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const executable = join(dir, 'fake-codex.cjs');
+  writeFileSync(executable, `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const readline = require('node:readline');
+const lock = path.join(__dirname, 'active.lock');
+fs.closeSync(fs.openSync(lock, 'wx'));
+process.on('exit', () => fs.unlinkSync(lock));
+const log = value => fs.appendFileSync(__filename + '.calls', JSON.stringify(value) + '\\n');
+log({ args: process.argv.slice(2), cwd: process.cwd(), credentials: ['OPENAI_API_KEY', 'CODEX_API_KEY', 'SYNAPSE_ADMIN_TOKEN', 'SYNAPSE_REGISTRATION_SHARED_SECRET', 'MATRIX_OWNER_ID'].filter(key => process.env[key]) });
+const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
+const respond = (id, result) => send({ id, result });
+const threadId = 'thread_1', turnId = 'turn_1';
+let prompt = '', instructions = '', updates = [];
+const complete = (text, status = 'completed') => {
+  send({ method: 'item/completed', params: { threadId, turnId, item: { id: 'comment', type: 'agentMessage', text: 'Private commentary', phase: 'commentary' } } });
+  send({ method: 'item/completed', params: { threadId, turnId, item: { id: 'answer', type: 'agentMessage', text, phase: 'final_answer' } } });
+  send({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status, items: [] } } });
+};
+readline.createInterface({ input: process.stdin }).on('line', line => {
+  const message = JSON.parse(line); log(message);
+  const { id, method, params: p } = message;
+  if (method === 'initialize') return respond(id, {});
+  if (method === 'initialized') return;
+  if (method === 'account/read') return respond(id, { account: { type: ${JSON.stringify(accountType)} } });
+  if (method === 'account/rateLimits/read') return respond(id, { rateLimits: { primary: { usedPercent: 18, windowDurationMins: 10080, resetsAt: Date.now() / 1000 + 86400 } } });
+  if (method === 'plugin/read') return respond(id, { plugin: {
+    marketplaceName: 'openai-curated-remote', description: 'Test GitHub integration',
+    apps: [{ name: 'GitHub' }], mcpServers: ['github'],
+    summary: { name: p.pluginName, installed: p.pluginName === 'installed', installPolicy: 'AVAILABLE', availability: 'AVAILABLE' }
+  } });
+  if (method === 'plugin/install') {
+    if (p.pluginName === 'failure') return send({ id, error: { code: -32603, message: 'Secret diagnostic' } });
+    return respond(id, { authPolicy: 'ON_USE', appsNeedingAuth: [{ name: 'GitHub', installUrl: 'https://github.test/login' }] });
+  }
+  if (method === 'thread/start' || method === 'thread/resume') { instructions = p.config?.developer_instructions; return respond(id, { thread: { id: threadId } }); }
+  if (method === 'turn/start') {
+    prompt = p.input[0].text;
+    send({ method: 'turn/started', params: { threadId, turn: { id: turnId, status: 'inProgress', items: [] } } });
+    const begin = () => {
+      respond(id, { turn: { id: turnId, status: 'inProgress', items: [] } });
+      if (prompt.includes('[fail]')) return complete('', 'failed');
+      if (prompt.includes('[wait]')) return;
+      if (prompt.includes('[approval]')) return send({ id: 999, method: 'item/commandExecution/requestApproval', params: {} });
+      if (prompt.includes('[confirm]')) {
+        const params = { threadId: prompt.includes('[wrong-thread]') ? 'other' : threadId, turnId, itemId: 'command', command: 'echo approved', cwd: __dirname, availableDecisions: ['accept', 'decline'], reason: 'Test approval' };
+        send({ id: 'approval-A', method: 'item/commandExecution/requestApproval', params });
+        if (prompt.includes('[parallel]')) send({ id: 1001, method: 'item/commandExecution/requestApproval', params: { ...params, command: 'echo second' } });
+        return;
+      }
+      if (prompt.includes('[form]')) return send({ id: 'approval-A', method: 'mcpServer/elicitation/request', params: {
+        threadId, turnId: null, serverName: 'github', mode: 'form', message: 'Confirm operation',
+        requestedSchema: { type: 'object', properties: { confirm: { type: 'boolean' } }, required: ['confirm'] }
+      } });
+      if (prompt.includes('[question]')) return send({ id: 'approval-A', method: 'item/tool/requestUserInput', params: {
+        threadId, turnId, itemId: 'question', questions: [{ id: 'color', question: 'Which color?', isSecret: false, options: null }]
+      } });
+      if (prompt.includes('[attachment]')) {
+        const root = JSON.parse(instructions.split("conversation's outbox: ")[1].split('. It is emptied')[0]);
+        fs.writeFileSync(path.join(root, 'answer.txt'), 'file contents');
+        return complete('Here is the file.\\n' + String.fromCharCode(96).repeat(3) + 'matrix-attachments\\n' + JSON.stringify({ files: [{ path: 'answer.txt' }] }) + '\\n' + String.fromCharCode(96).repeat(3));
+      }
+      complete('done');
+    };
+    if (prompt.includes('[slow-start]')) setTimeout(begin, 30); else begin();
+    return;
+  }
+  if (id === 999) return complete(message.result?.decision === 'decline' ? 'denied' : 'WRONG');
+  if (id === 'approval-A' || id === 1001) {
+    updates.push(id + ': ' + JSON.stringify(message.result));
+    if (!prompt.includes('[parallel]') || updates.length === 2) complete(updates.join(' | '));
+    return;
+  }
+  if (method === 'turn/steer') {
+    const text = p.input[0].text;
+    if (text.includes('[withdraw]')) send({ method: 'serverRequest/resolved', params: { threadId, requestId: 'approval-A' } });
+    if (text.includes('[transport-failure]')) return process.exit(1);
+    if (text.includes('[finish-race]')) {
+      complete('finished before update');
+      return send({ id, error: { code: -32600, message: 'No active turn' } });
+    }
+    if (text.includes('[reject]')) return send({ id, error: { code: -32600, message: 'Rejected' } });
+    updates.push(text); respond(id, { turnId });
+    if (text.includes('[finish]')) complete('steered: ' + updates.join(' | '));
+    return;
+  }
+  if (method === 'turn/interrupt') { respond(id, {}); complete('', 'interrupted'); return; }
+});
+process.stdin.on('end', () => process.exit(0));
+`, { mode: 0o700 });
+  const config = loadConfig({ MATRIX_HOMESERVER: 'https://matrix.test', MATRIX_OWNER_ID: '@owner:test', RIFTJACK_WORKSPACE: dir, CODEX_PATH: executable });
+  const state = new State(join(dir, 'sessions.json'));
+  const backend = createBackend(config, state);
+  const calls = () => existsSync(executable + '.calls') ? readFileSync(executable + '.calls', 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [];
+  return { dir, state, backend, calls, config };
+}
+const signal = () => new AbortController().signal;
+
+test('Codex usage reads account limits without creating a model turn and closes its process', async t => {
+  const f = setup(t);
+  assert.match(await codexUsage(f.config, signal()), /82%/);
+  assert.deepEqual(f.calls().filter(c => c.method).map(c => c.method),
+    ['initialize', 'initialized', 'account/read', 'account/rateLimits/read']);
+  assert.deepEqual(f.calls()[0].credentials, []);
+  assert.equal(existsSync(join(f.dir, 'active.lock')), false);
+});
+
+test('Codex usage refuses non-ChatGPT auth and never starts when already aborted', async t => {
+  const f = setup(t, 'apiKey');
+  await assert.rejects(codexUsage(f.config, signal()), /ChatGPT/);
+  assert.equal(f.calls().some(c => c.method === 'account/rateLimits/read'), false);
+  const count = f.calls().length;
+  await assert.rejects(codexUsage(f.config, AbortSignal.abort()), { name: 'AbortError' });
+  assert.equal(f.calls().length, count);
+});
+
+test('per-bot Codex workspace reaches the process, thread cwd and attachment outbox', async t => {
+  const f = setup(t);
+  const project = join(f.dir, 'Other Project'); mkdirSync(project);
+  const config = configForWorkspace(f.config, project);
+  const backend = createBackend(config, f.state);
+  const result = await backend('codex', '[attachment]', 'custom-room', signal(), '@owner:test') as BackendReply;
+  assert.equal(f.calls().find(c => c.cwd)?.cwd, realpathSync(project));
+  assert.equal(f.calls().find(c => c.method === 'thread/start').params.cwd, realpathSync(project));
+  assert.ok(result.attachments[0].path.startsWith(join(realpathSync(project), '.matrix-media')));
+  assert.equal(existsSync(join(f.config.workspace, '.matrix-media')), false);
+});
+
+test('connector instructions are Codex developer instructions, not part of the user message', async t => {
+  const f = setup(t);
+  await f.backend('codex', 'hello', 'key', signal(), '@owner:test');
+  assert.match(f.calls().find(c => c.method === 'thread/start').params.config.developer_instructions, /conversation's outbox: ".*outbox"/);
+  assert.equal(f.calls().find(c => c.method === 'turn/start').params.input[0].text, 'hello');
+});
+
+test('Codex uses an independently installed executable from PATH by default', async t => {
+  const f = setup(t);
+  copyFileSync(f.config.codexPath, join(f.dir, 'codex'));
+  const previous = process.env.PATH;
+  t.after(() => { if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous; });
+  process.env.PATH = [f.dir, previous].filter(Boolean).join(delimiter);
+  const config = loadConfig({ MATRIX_HOMESERVER: 'https://matrix.test', MATRIX_OWNER_ID: '@owner:test', RIFTJACK_WORKSPACE: f.dir });
+  const backend = createBackend(config, f.state);
+  assert.equal(await backend('codex', 'hello', 'external-codex', signal(), '@owner:test'), 'done');
+  assert.equal(f.state.session('external-codex').codex, 'thread_1');
+});
+
+test('missing Codex reports installation instructions without leaving a task active', async t => {
+  const f = setup(t);
+  const backend = createBackend({ ...f.config, codexPath: join(f.dir, 'not-installed') }, f.state);
+  for (let i = 0; i < 2; i++) {
+    await assert.rejects(backend('codex', 'hello', 'missing-codex', signal(), '@owner:test'), /Install it on the host and set CODEX_PATH/);
+  }
+  assert.deepEqual(f.state.session('missing-codex'), {});
+});
+
+test('App Server preserves ChatGPT-only authentication, sandbox settings and conversation resumption', async t => {
+  const f = setup(t);
+  const keys = ['OPENAI_API_KEY', 'CODEX_API_KEY', 'SYNAPSE_ADMIN_TOKEN', 'SYNAPSE_REGISTRATION_SHARED_SECRET', 'MATRIX_OWNER_ID'];
+  const previous = keys.map(key => process.env[key]);
+  t.after(() => keys.forEach((key, i) => { if (previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; }));
+  for (const key of keys) process.env[key] = 'sentinel-not-a-real-key';
+  assert.equal(await f.backend('codex', 'hello', 'conversation', signal(), '@owner:test'), 'done');
+  assert.equal(await f.backend('codex', 'follow up', 'conversation', signal(), '@owner:test'), 'done');
+  for (const call of f.calls().filter(c => c.args)) {
+    assert.deepEqual(call.credentials, []);
+    for (const arg of ['app-server', 'stdio://', 'forced_login_method="chatgpt"', 'model_provider="openai"', 'sandbox_mode="workspace-write"', 'approval_policy="never"', 'sandbox_workspace_write.network_access=false', 'web_search="disabled"']) assert.ok(call.args.includes(arg));
+  }
+  const resumed = f.calls().find(c => c.method === 'thread/resume');
+  assert.equal(resumed.params.threadId, 'thread_1');
+  assert.equal(resumed.params.approvalPolicy, 'never'); assert.equal(resumed.params.sandbox, 'workspace-write');
+  assert.equal(f.state.session('conversation').codex, 'thread_1');
+  await assert.rejects(f.backend('codex', '[fail]', 'conversation', signal(), '@owner:test'), /task failed/);
+  assert.equal(await f.backend('codex', 'retry', 'conversation', signal(), '@owner:test'), 'done');
+});
+
+test('API-key accounts cannot start a model turn', async t => {
+  const f = setup(t, 'apiKey');
+  await assert.rejects(f.backend('codex', 'hello', 'key', signal(), '@owner:test'), /ChatGPT account/);
+  assert.ok(!f.calls().some(c => c.method === 'turn/start'));
+});
+
+test('native images and local audio/file metadata survive the App Server transport and attachment reply parsing', async t => {
+  const f = setup(t);
+  const attachments = [
+    { path: join(f.dir, 'image.png'), name: 'image.png', image: true, mimetype: 'image/png', size: 10 },
+    { path: join(f.dir, 'audio.ogg'), name: 'audio.ogg', image: false, mimetype: 'audio/ogg', size: 10 },
+    { path: join(f.dir, 'notes.txt'), name: 'notes.txt', image: false, mimetype: 'text/plain', size: 10 },
+  ];
+  const reply = await f.backend('codex', '[attachment]', 'key', signal(), '@owner:test', attachments) as BackendReply;
+  const input = f.calls().find(c => c.method === 'turn/start').params.input;
+  assert.deepEqual(input[1], { type: 'localImage', path: attachments[0].path });
+  assert.equal(input.length, 2); assert.ok(input[0].text.includes(attachments[1].path)); assert.ok(input[0].text.includes(attachments[2].path));
+  assert.equal(reply.text, 'Here is the file.'); assert.equal(readFileSync(reply.attachments[0].path, 'utf8'), 'file contents');
+});
+
+test('steering during startup reaches the same active turn with text and images, without restarting', async t => {
+  const f = setup(t);
+  const run = f.backend('codex', '[wait] [slow-start]', 'key', signal(), '@owner:test');
+  const image = { path: '/image.png', name: 'image.png', image: true, mimetype: 'image/png', size: 1 };
+  assert.equal(await f.backend.steer('Use this picture', 'key', signal(), '@owner:test', [image]), true);
+  assert.equal(await f.backend.steer('Make it blue [finish]', 'key', signal(), '@owner:test'), true);
+  assert.match(String(await run), /Use this picture[\s\S]*Make it blue/);
+  const calls = f.calls();
+  assert.equal(calls.filter(c => c.method === 'turn/start').length, 1);
+  assert.equal(calls.filter(c => c.args).length, 1);
+  const steers = calls.filter(c => c.method === 'turn/steer');
+  assert.equal(steers[0].params.expectedTurnId, 'turn_1'); assert.equal(steers[0].params.threadId, 'thread_1');
+  assert.deepEqual(steers[0].params.input[1], { type: 'localImage', path: '/image.png' });
+  assert.ok(!calls.some(c => c.method === 'turn/interrupt'));
+});
+
+test('other conversations and senders cannot steer; other conversations run in parallel', async t => {
+  const f = setup(t);
+  const run = f.backend('codex', '[wait]', 'key', signal(), '@owner:test');
+  assert.equal(await f.backend.steer('wrong room', 'other-key', signal(), '@owner:test'), false);
+  assert.equal(await f.backend.steer('wrong sender', 'key', signal(), '@guest:test'), false);
+  await assert.rejects(f.backend('codex', 'duplicate', 'key', signal(), '@owner:test'), /already running in this conversation/);
+  assert.equal(await f.backend.steer('[finish]', 'key', signal(), '@owner:test'), true);
+  await run;
+  assert.equal(f.calls().filter(c => c.method === 'turn/steer').length, 1);
+});
+
+test('completion race returns a follow-up result only after an explicit steering rejection', async t => {
+  const f = setup(t);
+  const run = f.backend('codex', '[wait]', 'key', signal(), '@owner:test');
+  assert.equal(await f.backend.steer('[finish-race]', 'key', signal(), '@owner:test'), false);
+  assert.equal(await run, 'finished before update');
+  assert.equal(await f.backend.steer('late update', 'key', signal(), '@owner:test'), false);
+  assert.equal(await f.backend('codex', 'late update', 'key', signal(), '@owner:test'), 'done');
+});
+
+test('steering rejection does not kill the original task or silently enqueue duplicate work', async t => {
+  const f = setup(t);
+  const run = f.backend('codex', '[wait]', 'key', signal(), '@owner:test');
+  await assert.rejects(f.backend.steer('[reject]', 'key', signal(), '@owner:test'), /rejected/);
+  assert.equal(await f.backend.steer('[finish]', 'key', signal(), '@owner:test'), true);
+  assert.equal(await run, 'steered: [finish]');
+});
+
+test('transport failure rejects both the task and its unconfirmed steering request', async t => {
+  const f = setup(t);
+  const run = f.backend('codex', '[wait]', 'key', signal(), '@owner:test');
+  const failedRun = assert.rejects(run, /exited/);
+  await assert.rejects(f.backend.steer('[transport-failure]', 'key', signal(), '@owner:test'), /exited/);
+  await failedRun;
+});
+
+test('cancellation interrupts the active turn and waits for child exit before allowing another task', async t => {
+  const f = setup(t);
+  const controller = new AbortController();
+  const run = f.backend('codex', '[wait]', 'key', controller.signal, '@owner:test');
+  const stopped = assert.rejects(run);
+  await f.backend.steer('update', 'key', controller.signal, '@owner:test');
+  controller.abort();
+  await stopped;
+  assert.ok(f.calls().some(c => c.method === 'turn/interrupt'));
+  assert.equal(await f.backend('codex', 'next', 'key', signal(), '@owner:test'), 'done');
+});
+
+test('cancellation during server startup does not start a model turn', async t => {
+  const f = setup(t);
+  const controller = new AbortController();
+  const run = f.backend('codex', 'hello', 'key', controller.signal, '@owner:test');
+  const stopped = assert.rejects(run);
+  controller.abort(); await stopped;
+  assert.ok(!f.calls().some(c => c.method === 'turn/start'));
+});
+
+test('unsolicited approval requests are declined without changing permissions', async t => {
+  const f = setup(t);
+  assert.equal(await f.backend('codex', '[approval]', 'key', signal(), '@owner:test'), 'denied');
+  assert.deepEqual(f.calls().find(c => c.id === 999).result, { decision: 'decline' });
+});
+
+test('Matrix bridge and App Server deliver steering end to end without a second model turn', async t => {
+  const f = setup(t);
+  const replies: string[] = [];
+  let running!: () => void;
+  const ready = new Promise<void>(resolve => { running = resolve; });
+  const bridge = new Bridge({
+    botId: '@bot:test', owner: '@owner:test', kind: 'codex', since: 0, timeoutMs: 5000, state: f.state,
+    isAuthorized: user => user === '@owner:test', isPrivateRoom: async () => true,
+    run: async (...args) => { const result = f.backend(...args); running(); return result; },
+    steer: f.backend.steer, reply: async (_room, _event, text) => { replies.push(text); },
+    report: () => assert.fail('Unexpected bridge error'),
+  });
+  const event = (id: string, body: string): MatrixEvent => ({ event_id: id, type: 'm.room.message', sender: '@owner:test', origin_server_ts: 2000, content: { msgtype: 'm.text', body } });
+  const task = bridge.handle('!dm:test', event('$first', '[wait]'));
+  await ready;
+  await bridge.handle('!dm:test', event('$update', 'Use blue [finish]'));
+  await task;
+  assert.ok(replies.includes('Added your message to the current task.'));
+  assert.equal(replies.at(-1), 'steered: Use blue [finish]');
+  assert.equal(f.calls().filter(c => c.method === 'turn/start').length, 1);
+  assert.equal(f.calls().filter(c => c.method === 'turn/steer').length, 1);
+});
+
+async function until(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 2000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) assert.fail('Timed out waiting for fake App Server');
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+}
+
+function confirming(t: { after(fn: () => void): void }) {
+  const f = setup(t);
+  const replies: string[] = [], errors: unknown[] = [];
+  let allowed = true, privateRoom = true, eventId = 0;
+  const bridge = new Bridge({
+    botId: '@bot:test', owner: '@owner:test', kind: 'codex', since: 1000, timeoutMs: 5000, state: f.state,
+    isAuthorized: () => allowed, isPrivateRoom: async () => privateRoom,
+    run: f.backend, steer: f.backend.steer,
+    confirmation: async (_room, _event, text, controls, markdown) => {
+      assert.match(markdown, /^### Confirmation /);
+      replies.push(text); controls.bind('$request-' + replies.length);
+    },
+    reply: async (_room, _event, text) => { replies.push(text); }, report: error => errors.push(error),
+    receive: async () => ({ path: '/file', name: 'caption', size: 1, image: false, mimetype: 'text/plain' }),
+  });
+  t.after(() => bridge.stop());
+  const event = (body: string): MatrixEvent => ({ event_id: '$confirmation-' + ++eventId, type: 'm.room.message', sender: '@owner:test', origin_server_ts: 2000, content: { msgtype: 'm.text', body } });
+  const confirmations = () => replies.filter(text => text.startsWith('Confirmation '));
+  const id = (index = 0) => /^Confirmation ([a-f0-9]{12})/.exec(confirmations()[index])![1];
+  return { ...f, bridge, replies, errors, event, confirmations, id,
+    reactionTarget: () => '$request-' + (replies.findIndex(text => text.startsWith('Confirmation ')) + 1),
+    revoke: () => { allowed = false; bridge.revoke('@owner:test'); }, publicRoom: () => { privateRoom = false; } };
+}
+
+test('ordinary messages in any language steer the task without answering a pending confirmation', async t => {
+  const f = confirming(t);
+  const task = f.bridge.handle('!dm:test', f.event('[confirm]'));
+  await until(() => f.confirmations().length === 1);
+  const updates = ['yes', 'no', 'Подтверждаю', 'нет', 'はい', 'いいえ', 'نعم', 'non', 'Explain the command first.'];
+  for (const text of updates) {
+    await f.bridge.handle('!dm:test', f.event(text));
+    assert.equal(f.calls().some(c => c.id === 'approval-A'), false);
+  }
+  assert.deepEqual(f.calls().filter(c => c.method === 'turn/steer').map(c => c.params.input[0].text), updates);
+  await f.bridge.handle('!dm:test', f.event(`!deny ${f.id()}`));
+  await task;
+  assert.deepEqual(f.calls().find(c => c.id === 'approval-A').result, { decision: 'decline' });
+  assert.equal(f.calls().filter(c => c.method === 'turn/start').length, 1);
+  assert.deepEqual(f.errors, []);
+});
+
+for (const verb of ['approve', 'deny']) for (const withId of [true, false, 'reaction'] as const) test(`Matrix ${verb} ${withId === 'reaction' ? 'reaction' : withId ? 'with ID' : 'without ID'} answers the exact server request without steering and ignores replay`, async t => {
+  const f = confirming(t);
+  const task = f.bridge.handle('!dm:test', f.event('[confirm]'));
+  await until(() => f.confirmations().length === 1);
+  assert.equal(f.calls().some(c => c.id === 'approval-A'), false);
+  assert.match(f.confirmations()[0], /echo approved/);
+  const answer = withId === 'reaction' ? { ...f.event(''), type: 'm.reaction', content: {
+    'm.relates_to': { rel_type: 'm.annotation', event_id: f.reactionTarget(), key: verb === 'approve' ? '✅' : '❌' },
+  } } : f.event(`!${verb}${withId ? ' ' + f.id() : ''}`);
+  await f.bridge.handle('!dm:test', answer);
+  await task;
+  await f.bridge.handle('!dm:test', answer);
+  await f.bridge.handle('!dm:test', f.event(`!${verb} ${f.id()}`));
+  assert.equal(f.calls().filter(c => c.id === 'approval-A').length, 1);
+  assert.deepEqual(f.calls().find(c => c.id === 'approval-A').result, { decision: verb === 'approve' ? 'accept' : 'decline' });
+  assert.equal(f.calls().filter(c => c.method === 'turn/start').length, 1);
+  assert.equal(f.calls().filter(c => c.method === 'turn/steer').length, 0);
+  assert.ok(f.calls().find(c => c.args).args.includes('approval_policy="on-request"'));
+  assert.equal(f.calls().find(c => c.method === 'thread/start').params.approvalsReviewer, 'user');
+  assert.deepEqual(f.errors, []);
+});
+
+test('another sender, room, thread, edited event, caption or old event cannot approve', async t => {
+  const f = confirming(t);
+  const task = f.bridge.handle('!dm:test', f.event('[confirm]'));
+  await until(() => f.confirmations().length === 1);
+  const text = `!approve ${f.id()}`;
+  await f.bridge.handle('!other:test', f.event(text));
+  await f.bridge.handle('!dm:test', { ...f.event(text), sender: '@guest:test' });
+  await f.bridge.handle('!dm:test', { ...f.event(text), origin_server_ts: 500 });
+  for (const rel_type of ['m.thread', 'm.replace']) {
+    await f.bridge.handle('!dm:test', { ...f.event(text), content: { msgtype: 'm.text', body: text, 'm.relates_to': { rel_type, event_id: '$other' } } });
+  }
+  await f.bridge.handle('!dm:test', { ...f.event(text), content: { msgtype: 'm.notice', body: text } });
+  await f.bridge.handle('!dm:test', { ...f.event(text), content: { msgtype: 'm.file', body: text } });
+  assert.equal(f.calls().some(c => c.id === 'approval-A'), false);
+  // Matrix reply fallbacks must be removed, not sent as instructions to the model.
+  await f.bridge.handle('!dm:test', { ...f.event(text), content: { msgtype: 'm.text', body: `> <@bot:test> Confirmation\n> Request text\n\n${text}`, 'm.relates_to': { 'm.in_reply_to': { event_id: '$bot-message' } } } });
+  await task;
+  assert.deepEqual(f.calls().find(c => c.id === 'approval-A').result, { decision: 'accept' });
+});
+
+test('parallel confirmation IDs route independently and support string and numeric RPC IDs', async t => {
+  const f = confirming(t);
+  const task = f.bridge.handle('!dm:test', f.event('[confirm] [parallel]'));
+  await until(() => f.confirmations().length === 2);
+  await f.bridge.handle('!dm:test', f.event('!approve'));
+  assert.match(f.replies.at(-1)!, /More than one/);
+  assert.equal(f.calls().some(c => c.id === 'approval-A' || c.id === 1001), false);
+  await f.bridge.handle('!dm:test', f.event(`!deny ${f.id(1)}`));
+  await f.bridge.handle('!dm:test', f.event('!approve'));
+  await task;
+  assert.deepEqual(f.calls().find(c => c.id === 1001).result, { decision: 'decline' });
+  assert.deepEqual(f.calls().find(c => c.id === 'approval-A').result, { decision: 'accept' });
+});
+
+test('MCP form validation keeps the request pending until an explicit valid answer', async t => {
+  const f = confirming(t);
+  const task = f.bridge.handle('!dm:test', f.event('[form]'));
+  await until(() => f.confirmations().length === 1);
+  await f.bridge.handle('!dm:test', f.event(`!approve ${f.id()}`));
+  await f.bridge.handle('!dm:test', f.event(`!answer ${f.id()} {"confirm":"yes"}`));
+  assert.equal(f.calls().some(c => c.id === 'approval-A'), false);
+  await f.bridge.handle('!dm:test', f.event('!answer {"confirm":true}'));
+  await task;
+  assert.deepEqual(f.calls().find(c => c.id === 'approval-A').result, { action: 'accept', content: { confirm: true }, _meta: null });
+});
+
+test('agent questions receive structured answers rather than new model messages', async t => {
+  const f = confirming(t);
+  const task = f.bridge.handle('!dm:test', f.event('[question]'));
+  await until(() => f.confirmations().length === 1);
+  await f.bridge.handle('!dm:test', f.event('!answer blue'));
+  await task;
+  assert.deepEqual(f.calls().find(c => c.id === 'approval-A').result, { answers: { color: { answers: ['blue'] } } });
+  assert.equal(f.calls().some(c => c.method === 'turn/steer'), false);
+});
+
+test('server withdrawal expires the ID without a second RPC response', async t => {
+  const f = confirming(t);
+  const task = f.bridge.handle('!dm:test', f.event('[confirm]'));
+  await until(() => f.confirmations().length === 1);
+  await f.bridge.handle('!dm:test', f.event('[withdraw]'));
+  await f.bridge.handle('!dm:test', f.event(`!approve ${f.id()}`));
+  assert.match(f.replies.at(-1)!, /unknown, expired/);
+  await f.bridge.handle('!dm:test', f.event('[finish]'));
+  await task;
+  assert.equal(f.calls().some(c => c.id === 'approval-A'), false);
+});
+
+for (const end of ['cancel', 'revoke', 'finish', 'crash']) test(`${end} expires confirmations and releases the workspace`, async t => {
+  const f = confirming(t);
+  const task = f.bridge.handle('!dm:test', f.event('[confirm]'));
+  await until(() => f.confirmations().length === 1);
+  if (end === 'revoke') f.revoke();
+  else await f.bridge.handle('!dm:test', f.event(end === 'cancel' ? '!cancel' : end === 'crash' ? '[transport-failure]' : '[finish]'));
+  await task;
+  await f.bridge.handle('!dm:test', f.event(`!approve ${f.id()}`));
+  assert.equal(f.calls().some(c => c.id === 'approval-A'), false);
+  assert.equal(f.bridge.busy, false);
+});
+
+test('changed room membership prevents an answer reaching the server', async t => {
+  const f = confirming(t);
+  const task = f.bridge.handle('!dm:test', f.event('[confirm]'));
+  await until(() => f.confirmations().length === 1);
+  f.publicRoom();
+  await f.bridge.handle('!dm:test', f.event(`!approve ${f.id()}`));
+  f.bridge.stop(); await task;
+  assert.equal(f.calls().some(c => c.id === 'approval-A'), false);
+});
+
+test('wrong-thread requests and never policy are declined without an interactive prompt', async t => {
+  const f = confirming(t);
+  await f.bridge.handle('!dm:test', f.event('[confirm] [wrong-thread]'));
+  f.config.codexApprovalPolicy = 'never';
+  await f.bridge.handle('!dm:test', f.event('[confirm]'));
+  assert.equal(f.confirmations().length, 0);
+  assert.ok(f.calls().filter(c => c.id === 'approval-A').every(c => c.result.decision === 'decline'));
+});
+
+for (const verb of ['approve', 'deny']) test(`plugin installation ${verb} uses local RPCs and never starts a model turn`, async t => {
+  const f = confirming(t);
+  const task = f.bridge.handle('!dm:test', f.event('!plugin install github'));
+  await until(() => f.confirmations().length === 1);
+  assert.match(f.confirmations()[0], /Test GitHub integration/);
+  assert.equal(f.calls().some(c => c.method === 'plugin/install'), false);
+  await f.bridge.handle('!dm:test', f.event(`!${verb}`));
+  await task;
+  assert.equal(f.calls().filter(c => c.method === 'plugin/install').length, verb === 'approve' ? 1 : 0);
+  assert.equal(f.calls().some(c => c.method === 'thread/start' || c.method === 'turn/start'), false);
+  if (verb === 'approve') {
+    assert.deepEqual(f.calls().find(c => c.method === 'plugin/install').params, { pluginName: 'github', remoteMarketplaceName: 'openai-curated-remote' });
+    assert.match(f.replies.at(-1)!, /Browser authentication is still required/);
+    assert.match(f.replies.at(-1)!, /https:\/\/github.test\/login/);
+  }
+});
+
+test('only owner can install; malformed plugin commands are not prompts; installed plugins are not reinstalled', async t => {
+  const f = confirming(t);
+  await f.bridge.handle('!dm:test', { ...f.event('!plugin install github'), sender: '@guest:test' });
+  await f.bridge.handle('!dm:test', f.event('!plugin install ../../plugin'));
+  assert.equal(f.calls().length, 0);
+  await f.bridge.handle('!dm:test', f.event('!plugin install installed'));
+  assert.equal(f.confirmations().length, 0);
+  assert.equal(f.calls().some(c => c.method === 'plugin/install'), false);
+  assert.match(f.replies.at(-1)!, /already installed/);
+});
+
+test('failed plugin installation reports uncertain state without retrying or claiming success', async t => {
+  const f = confirming(t);
+  const task = f.bridge.handle('!dm:test', f.event('!plugin install failure'));
+  await until(() => f.confirmations().length === 1);
+  await f.bridge.handle('!dm:test', f.event(`!approve ${f.id()}`)); await task;
+  assert.equal(f.calls().filter(c => c.method === 'plugin/install').length, 1);
+  assert.match(f.replies.at(-1)!, /installation was not confirmed/);
+  assert.doesNotMatch(f.replies.at(-1)!, /Secret diagnostic/);
+});
