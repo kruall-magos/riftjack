@@ -72,3 +72,9 @@ Normal shutdown and `!restart` stop and reap the managed SSH process before the 
 ## Provisioning failures
 
 Bot creation failures are reported in the manager DM and connector log with the failed step, API origin, HTTP status or known network/Matrix error code, and troubleshooting advice. A refused connection to a loopback Admin API includes an SSH tunnel hint. If account creation was attempted before the failure, check Synapse accounts before retrying: the account may exist even though the connector did not save its credentials. Unexpected task errors also include safe codes from nested causes. Raw exception messages, response bodies, request headers, passwords and tokens are not dumped into diagnostics.
+
+## Codex model settings
+
+Set `CODEX_MODEL`, `CODEX_REASONING_EFFORT` and `CODEX_SERVICE_TIER` in `.env` to pin the model, reasoning effort and service tier for all Codex bots. Blank values inherit Codex settings. Effort and tier availability depend on the selected model and installed Codex CLI. For example, `CODEX_REASONING_EFFORT=high` selects high reasoning effort; `CODEX_SERVICE_TIER=default` explicitly selects standard speed, while `priority` requests priority processing.
+
+Restart Riftjack after editing these settings. Explicit values apply to both new and resumed conversations, without resetting their history. They do not edit your global Codex configuration. See the [Codex configuration reference](https://developers.openai.com/codex/config-reference).

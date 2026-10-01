@@ -117,6 +117,56 @@ process.stdin.on('end', () => process.exit(0));
 }
 const signal = () => new AbortController().signal;
 
+test('Codex model settings trim explicit values and leave blanks inherited', t => {
+  const f = setup(t);
+  const base = { MATRIX_HOMESERVER: 'https://matrix.test', MATRIX_OWNER_ID: '@owner:test', RIFTJACK_WORKSPACE: f.dir };
+  for (const empty of [undefined, '', '  ']) {
+    const config = loadConfig({ ...base, CODEX_MODEL: empty, CODEX_REASONING_EFFORT: empty, CODEX_SERVICE_TIER: empty });
+    assert.equal(config.codexModel, undefined);
+    assert.equal(config.codexReasoningEffort, undefined);
+    assert.equal(config.codexServiceTier, undefined);
+  }
+  const config = loadConfig({ ...base, CODEX_MODEL: ' example-model ', CODEX_REASONING_EFFORT: ' high ', CODEX_SERVICE_TIER: ' default ' });
+  assert.equal(config.codexModel, 'example-model');
+  assert.equal(config.codexReasoningEffort, 'high');
+  assert.equal(config.codexServiceTier, 'default');
+});
+
+test('Codex pins model, effort and tier for new and resumed conversations', async t => {
+  const f = setup(t);
+  for (const [model, effort, tier] of [['example-model', 'medium', 'priority'], ['other-model', 'high', 'default']]) {
+    const backend = createBackend({ ...f.config, codexModel: model, codexReasoningEffort: effort, codexServiceTier: tier }, f.state);
+    await backend('codex', 'hello', 'key', signal(), '@owner:test');
+    const thread = f.calls().filter(c => c.method === 'thread/start' || c.method === 'thread/resume').at(-1);
+    assert.equal(thread.method, tier === 'priority' ? 'thread/start' : 'thread/resume');
+    assert.equal(thread.params.model, model);
+    assert.equal(thread.params.serviceTier, tier);
+    assert.equal(thread.params.config.model_reasoning_effort, effort);
+    if (tier === 'default') assert.equal(thread.params.threadId, 'thread_1');
+    const turn = f.calls().filter(c => c.method === 'turn/start').at(-1).params;
+    assert.equal(turn.model, model);
+    assert.equal(turn.effort, effort);
+    assert.equal(turn.serviceTier, tier);
+  }
+  assert.equal(f.state.session('key').codex, 'thread_1');
+});
+
+test('unset Codex model settings omit overrides on new and resumed conversations', async t => {
+  const f = setup(t);
+  await f.backend('codex', 'hello', 'key', signal(), '@owner:test');
+  await f.backend('codex', 'again', 'key', signal(), '@owner:test');
+  for (const call of f.calls()) {
+    if (call.method === 'thread/start' || call.method === 'thread/resume') {
+      assert.equal(Object.hasOwn(call.params, 'model'), false);
+      assert.equal(Object.hasOwn(call.params, 'serviceTier'), false);
+      assert.equal(Object.hasOwn(call.params.config, 'model_reasoning_effort'), false);
+    }
+    if (call.method === 'turn/start') {
+      for (const key of ['model', 'effort', 'serviceTier']) assert.equal(Object.hasOwn(call.params, key), false);
+    }
+  }
+});
+
 test('Codex usage reads account limits without creating a model turn and closes its process', async t => {
   const f = setup(t);
   assert.match(await codexUsage(f.config, signal()), /82%/);

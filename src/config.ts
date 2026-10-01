@@ -50,6 +50,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     registrationSecret: env.SYNAPSE_REGISTRATION_SHARED_SECRET?.trim(),
     adminToken: env.SYNAPSE_ADMIN_TOKEN?.trim(),
     codexModel: env.CODEX_MODEL?.trim() || undefined,
+    codexReasoningEffort: env.CODEX_REASONING_EFFORT?.trim() || undefined,
+    codexServiceTier: env.CODEX_SERVICE_TIER?.trim() || undefined,
     codexPath: env.CODEX_PATH?.trim() || 'codex',
     claudeModel: env.CLAUDE_MODEL?.trim() || undefined,
     claudePath: env.CLAUDE_PATH?.trim() || 'claude',

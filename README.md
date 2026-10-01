@@ -79,7 +79,7 @@ codex login
 codex login status
 ```
 
-Choose ChatGPT authentication. Leave `CODEX_MODEL` blank to use the Codex default. Set `CODEX_PATH` if `codex` is not on the connector’s `PATH`.
+Choose ChatGPT authentication. Set `CODEX_MODEL`, `CODEX_REASONING_EFFORT` and `CODEX_SERVICE_TIER` to pin Codex settings for this connector, or leave them blank to inherit Codex settings. Use `CODEX_SERVICE_TIER=default` for standard speed instead of priority processing. Set `CODEX_PATH` if `codex` is not on the connector’s `PATH`.
 
 For **Claude**, install [Claude Code](https://code.claude.com/docs/en/setup), then run:
 

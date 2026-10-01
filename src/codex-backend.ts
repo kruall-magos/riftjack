@@ -84,9 +84,12 @@ export function createCodexBackend(config: Config, state: State): Backend & { st
       const instructionsHash = createHash('sha256').update(instructions).digest('hex');
       const options = {
         cwd: config.workspace, sandbox: config.sandbox, approvalPolicy: interact ? config.codexApprovalPolicy : 'never', approvalsReviewer: 'user', modelProvider: 'openai', model: config.codexModel,
+        serviceTier: config.codexServiceTier,
         // Configure new threads; resumed histories also need an explicit update below.
         developerInstructions: instructions,
-        config: { forced_login_method: 'chatgpt', model_provider: 'openai', 'sandbox_workspace_write.network_access': false, web_search: 'disabled' },
+        config: { forced_login_method: 'chatgpt', model_provider: 'openai', 'sandbox_workspace_write.network_access': false, web_search: 'disabled',
+          ...(config.codexReasoningEffort ? { model_reasoning_effort: config.codexReasoningEffort } : {}),
+        },
       };
       const thread = await server.request<{ thread: { id: string } }>(saved ? 'thread/resume' : 'thread/start', saved ? { ...options, threadId: saved, excludeTurns: true } : options);
       current.threadId = thread.thread.id;
@@ -104,6 +107,8 @@ export function createCodexBackend(config: Config, state: State): Backend & { st
       }
       const started = await server.request<{ turn: Turn }>('turn/start', {
         threadId: current.threadId, input: input(prompt, attachments),
+        // Explicit settings also override values persisted in resumed threads.
+        model: config.codexModel, effort: config.codexReasoningEffort, serviceTier: config.codexServiceTier,
       });
       state.update(key, { codexInstructionsHash: instructionsHash });
       current.turnId = started.turn.id;
