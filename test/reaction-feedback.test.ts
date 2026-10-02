@@ -28,7 +28,7 @@ function deferred() {
 }
 
 test('thumbs and hearts carry feedback about the exact message and its original thread', async () => {
-  for (const [emoji, meaning] of [['👍', 'agreement'], ['👍🏽', 'agreement'], ['👎', 'negative'], ['👎🏻', 'negative'], ['❤️', 'especially'], ['❤', 'especially'], ['♥️', 'especially']]) {
+  for (const [emoji, meaning] of [['👍', 'agreement'], ['👍🏽', 'agreement'], ['👎', 'negative'], ['👎🏻', 'negative'], ['❤️', 'strong appreciation'], ['❤', 'strong appreciation'], ['♥️', 'strong appreciation']]) {
     const result = await reactionFeedback(room, reaction(emoji), options(target('$thread')));
     assert.ok(result); assert.equal(result.event_id, '$reaction');
     assert.equal(payload(result).reaction, emoji); assert.match(payload(result).meaning, new RegExp(meaning));
@@ -36,6 +36,8 @@ test('thumbs and hearts carry feedback about the exact message and its original 
     assert.equal(result.content!['m.relates_to']!.event_id, '$thread');
     assert.equal(sessionKey(room, result), sessionKey(room, { ...message(), content: { 'm.relates_to': { rel_type: 'm.thread', event_id: '$thread' } } }));
     assert.match(result.content!.body!, /continue the agreed work/);
+    assert.match(result.content!.body!, /within the agreed work, either can mean "yes, go ahead"/);
+    assert.match(result.content!.body!, /do not invent a new task/);
     assert.match(result.content!.body!, /do not answer pending confirmation requests or replace required approvals/);
     assert.doesNotMatch(result.content!.body!, /Respond briefly|not permission to run commands/);
   }
@@ -82,7 +84,7 @@ for (const kind of ['codex', 'claude'] as const) test(`${kind} starts on feedbac
     run: async (_mode, prompt, key) => { calls.push({ prompt, key }); return 'Thanks for the feedback.'; },
     reply: async (_r, _e, text) => { replies.push(text); }, report: error => { throw error; } });
   await bridge.handle(room, reaction('❤️')); await bridge.handle(room, reaction('❤️'));
-  assert.equal(calls.length, 1); assert.match(calls[0].prompt, /especially liked/);
+  assert.equal(calls.length, 1); assert.match(calls[0].prompt, /strong appreciation or support/);
   assert.equal(calls[0].key, JSON.stringify([room, owner, '$thread']));
   assert.deepEqual(replies, ['Thanks for the feedback.']);
   await bridge.handle(room, reaction('✅', '$approval'));

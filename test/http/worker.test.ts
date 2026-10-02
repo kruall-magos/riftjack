@@ -63,7 +63,7 @@ test('worker HTTP API authenticates per bot, supports long polling, and validate
   await bridge.handle('!dm:test', { type: 'm.reaction', event_id: '$like', sender: '@alice:test', origin_server_ts: 1000,
     content: { 'm.relates_to': { rel_type: 'm.annotation', event_id: '$answer', key: '❤️' } } });
   const feedback = (await (await request()).json()).task;
-  assert.match(feedback.text, /especially liked/); assert.match(feedback.text, /Earlier worker answer/);
+  assert.match(feedback.text, /strong appreciation or support/); assert.match(feedback.text, /Earlier worker answer/);
   assert.ok(feedback.conversation.includes('$thread'));
 
 });

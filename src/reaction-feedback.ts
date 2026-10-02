@@ -7,7 +7,7 @@ export function feedbackMeaning(key: unknown): string | undefined {
   const emoji = key.replace(/\uFE0F/g, '');
   if (/^👍[\u{1F3FB}-\u{1F3FF}]?$/u.test(emoji)) return 'agreement; on a proposed next step, yes, go ahead';
   if (/^👎[\u{1F3FB}-\u{1F3FF}]?$/u.test(emoji)) return 'disapproval or negative feedback';
-  if (emoji === '❤' || emoji === '♥') return 'especially liked this message';
+  if (emoji === '❤' || emoji === '♥') return 'strong appreciation or support; on a proposed next step, may mean yes, go ahead';
 }
 
 // Resolve the original message in this room, rather than trusting a reaction's
@@ -35,7 +35,8 @@ export async function reactionFeedback(room: string, event: MatrixEvent, options
   if (!(await allowed())) return;
   return { type: 'm.room.message', event_id: event.event_id, sender: event.sender, origin_server_ts: event.origin_server_ts,
     content: { msgtype: 'm.text', body: 'The conversation partner reacted to an earlier message from this bot. Interpret the reaction in the context of that message and the ongoing conversation. '
-      + 'A thumbs-up on a proposed next step means "yes, go ahead"; continue the agreed work instead of only acknowledging the reaction. '
+      + 'A thumbs-up usually expresses agreement or approval; a heart expresses strong appreciation or support. On a concrete proposed next step within the agreed work, either can mean "yes, go ahead"; continue the agreed work instead of only acknowledging the reaction. '
+      + 'A reaction to a completed result or a personal remark may simply express appreciation; do not invent a new task from it. '
       + 'Reactions do not answer pending confirmation requests or replace required approvals, including publication approval. The quoted message below is context for the reaction.\n'
       + JSON.stringify({ reaction: relation.key, meaning, messageId: target.event_id,
         message: target.content.body.slice(0, 2000), truncated: target.content.body.length > 2000 }),
