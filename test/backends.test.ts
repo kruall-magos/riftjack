@@ -49,6 +49,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     if (p.pluginName === 'failure') return send({ id, error: { code: -32603, message: 'Secret diagnostic' } });
     return respond(id, { authPolicy: 'ON_USE', appsNeedingAuth: [{ name: 'GitHub', installUrl: 'https://github.test/login' }] });
   }
+  if (method === 'thread/resume' && p.threadId === 'busy_thread') return send({ id, error: { code: -32600, message: 'thread busy_thread already has an active writer' } });
   if (method === 'thread/start' || method === 'thread/resume') { instructions = p.developerInstructions; return respond(id, { thread: { id: threadId }, model: 'resolved-model', reasoningEffort: 'medium', serviceTier: 'default', cwd: process.cwd() }); }
   if (method === 'thread/inject_items') {
     if (fs.existsSync(path.join(__dirname, 'reject-instructions'))) return send({ id, error: { code: -32603, message: 'Test injection failure' } });
@@ -620,6 +621,31 @@ test('failed plugin installation reports uncertain state without retrying or cla
   assert.equal(f.calls().filter(c => c.method === 'plugin/install').length, 1);
   assert.match(f.replies.at(-1)!, /installation was not confirmed/);
   assert.doesNotMatch(f.replies.at(-1)!, /Secret diagnostic/);
+});
+
+
+test('busy Codex conversations explain the conflict without resetting history or starting a turn', async t => {
+  const f = setup(t);
+  f.state.update('busy-conversation', { codex: 'busy_thread' });
+  const { errorMessage } = await import('../src/errors.js');
+  await assert.rejects(f.backend('codex', 'hello', 'busy-conversation', signal(), '@owner:test'), error => {
+    const message = errorMessage(error);
+    assert.match(message, /already open in another Codex process/);
+    assert.match(message, /No conversation reset is needed/);
+    assert.doesNotMatch(message, /busy_thread/);
+    return true;
+  });
+  assert.equal(f.state.session('busy-conversation').codex, 'busy_thread');
+  assert.equal(f.calls().some(call => call.method === 'turn/start' || call.method === 'thread/start'), false);
+  assert.equal(existsSync(join(f.dir, 'active.lock')), false);
+});
+
+test('Codex RPC diagnostics expose only recognized actionable messages', async () => {
+  const { RpcError } = await import('../src/app-server.js');
+  const { errorMessage } = await import('../src/errors.js');
+  for (const message of ['private server diagnostic', 'thread busy_thread already has an active writer\nprivate secret', null]) {
+    assert.equal(errorMessage(new RpcError(-32600, message)), 'Codex App Server rejected a request.');
+  }
 });
 
 test('Codex status records CLI-reported values, refreshes on resume and stays conversation-scoped', async t => {

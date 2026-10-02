@@ -11,8 +11,15 @@ export type ServerRequest = { id: string | number; method: string; params: Recor
 export type RequestHandler = (request: ServerRequest, signal: AbortSignal) => Promise<object | undefined>;
 export type CodexInput = { type: 'text'; text: string; text_elements: [] } | { type: 'localImage'; path: string };
 
-export class RpcError extends Error {
-  constructor(readonly code: number) { super('Codex App Server rejected a request.'); }
+export class RpcError extends PublicError {
+  constructor(readonly code: number, message?: unknown) {
+    // Map only a known server error; never forward arbitrary diagnostics to chat.
+    const busy = code === -32600 && typeof message === 'string' &&
+      /^thread [a-zA-Z0-9_-]+ already has an active writer$/.test(message);
+    super(busy
+      ? 'This conversation is already open in another Codex process. Close it in the Codex app or finish the other active session, then retry in Matrix. No conversation reset is needed.'
+      : 'Codex App Server rejected a request.');
+  }
 }
 
 // JSONL over private stdio pipes; no HTTP listener and no connector credentials in the child.
@@ -81,7 +88,7 @@ export class AppServer {
           const request = this.pending.get(message.id);
           if (!request) return;
           this.pending.delete(message.id); clearTimeout(request.timer);
-          if (message.error) request.reject(new RpcError(message.error.code));
+          if (message.error) request.reject(new RpcError(message.error.code, message.error.message));
           else request.resolve(message.result);
         }
       } catch { fail(new Error('Invalid Codex App Server response.')); }
