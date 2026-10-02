@@ -163,6 +163,17 @@ async function main() {
     if (me.user_id !== account.userId || !me.device_id) throw new PublicError('Bot ' + account.userId + ' needs its own device-bound Matrix access token.');
     const authorized = (sender: string) => access.has(sender, account.kind === 'manager' ? undefined : account.userId);
     const privateRoom = (room: string, sender: string) => isPrivateRoom(client, room, account.userId, sender, authorized);
+    const reactionTarget = async (room: string, eventId: string): Promise<MatrixEvent | undefined> => {
+      try {
+        // getEvent returns a RoomEvent wrapper for plaintext targets and a
+        // processed raw event after decrypting encrypted targets.
+        const target = await client.getEvent(room, eventId);
+        return (target.raw ?? target) as MatrixEvent;
+      } catch (error) {
+        if ((error as { statusCode?: number })?.statusCode === 404) return;
+        throw error;
+      }
+    };
     const threadRelation = (event: MatrixEvent) => {
       const relation = event.content?.['m.relates_to'];
       return relation?.rel_type === 'm.thread'
@@ -200,7 +211,7 @@ async function main() {
         report: diagnostics,
       });
       workers.set(account.userId, service); workerServer.add(account.userId, token, service);
-      bridge = new WorkerBridge({ botId: account.userId, authorized, privateRoom, queue, service, state,
+      bridge = new WorkerBridge({ botId: account.userId, authorized, privateRoom, queue, service, state, reactionTarget,
         reply: async (room, event, text) => {
           if (!(await privateRoom(room, event.sender!))) throw new PublicError('Worker control reply withheld.');
           await client.sendMessage(room, { msgtype: 'm.notice', body: text, 'm.relates_to': threadRelation(event) });
@@ -210,7 +221,7 @@ async function main() {
       client.on('worker.inbox_failure', error => { diagnostics(error); shutdown(1); });
       console.log(account.userId + ' worker token file: ' + tokenFile);
     } else bridge = new Bridge({
-      botId: me.user_id, isAuthorized: authorized, kind: account.kind, isPrivateRoom: privateRoom,
+      botId: me.user_id, isAuthorized: authorized, kind: account.kind, isPrivateRoom: privateRoom, reactionTarget,
       owner: access.owner, isStopping: () => stopping || restart.pending, restart: (reply, target, scope) => restart.request(reply, target, scope),
       steer: backend.steer,
       queuedUpdateMessage: account.kind === 'claude' ? 'Your update is queued for Claude Code in this conversation. It will run after the current step.' : undefined,

@@ -7,7 +7,7 @@ export class WorkerMatrixClient extends MatrixClient {
   protected override async startSyncInternal() {
     this.persistTokenAfterSync = true;
     return this.startSync(async (type, ...args) => {
-      if (type === 'room.message') {
+      if (type === 'room.message' || (type === 'room.event' && args[1]?.type === 'm.reaction')) {
         try { await this.inbox?.(args[0], args[1]); }
         catch (error) { this.stop(); this.emit('worker.inbox_failure', error); throw error; }
       }

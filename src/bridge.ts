@@ -8,9 +8,10 @@ import { botHelp } from './bot-help.js';
 import { isMedia, type MediaContent, type IncomingAttachment, type OutgoingAttachment, type BackendReply } from './media.js';
 import { Interactions, type Interact, type ReactionControls } from './interactions.js';
 import type { PublishAction } from './publish-mcp.js';
+import { feedbackMeaning, reactionFeedback, type ReactionReader } from './reaction-feedback.js';
 
 export type MatrixEvent = {
-  type?: string; event_id?: string; sender?: string; origin_server_ts?: number;
+  type?: string; event_id?: string; sender?: string; origin_server_ts?: number; room_id?: string;
   content?: MediaContent & { 'm.relates_to'?: { rel_type?: string; event_id?: string; key?: string; 'm.in_reply_to'?: { event_id: string } } };
 };
 export type Mode = 'codex' | 'claude' | 'grok' | 'manager';
@@ -28,6 +29,7 @@ type Options = {
   reply: (room: string, event: MatrixEvent, text: string, markdown?: boolean, msgtype?: 'm.text' | 'm.notice') => Promise<void>;
   confirmation?: (room: string, event: MatrixEvent, text: string, controls: ReactionControls, markdown: string) => Promise<void>;
   receive?: (event: MatrixEvent, key: string, signal: AbortSignal) => Promise<IncomingAttachment>;
+  reactionTarget?: ReactionReader;
   acceptManagerAvatar?: (prompt: string, sender: string) => boolean;
   sendAttachments?: (room: string, event: MatrixEvent, files: OutgoingAttachment[], signal: AbortSignal) => Promise<void>;
   status?: (key: string) => string;
@@ -64,6 +66,12 @@ export class Bridge {
     const o = this.options;
     if (!event.sender || !o.isAuthorized(event.sender) || event.sender === o.botId) return;
     if (event.type === 'm.reaction') { await this.handleReaction(room, event); return; }
+    await this.handleMessage(room, event);
+  }
+
+  private async handleMessage(room: string, event: MatrixEvent, feedback = false): Promise<void> {
+    const o = this.options;
+    if (!event.sender || !o.isAuthorized(event.sender) || event.sender === o.botId) return;
     const media = isMedia(event.content?.msgtype);
     if (event.type !== 'm.room.message' || (event.content?.msgtype !== 'm.text' && !media) || !event.event_id) return;
     if (!Number.isFinite(event.origin_server_ts) || event.origin_server_ts! < o.since) return;
@@ -154,7 +162,7 @@ export class Bridge {
     if (!prompt || prompt.length > 16_000) { await o.reply(room, event, 'Supply a prompt of 1–16,000 characters.\n' + help(o.kind), true); return; }
     if (this.active) {
       if ((verb === 'codex' || verb === 'claude') && this.active.key === key && !this.active.publication && o.steer) {
-        await this.steer(this.active, room, event, prompt);
+        await this.steer(this.active, room, event, prompt, feedback);
       } else await reply(this.active.publication ? 'A publication review is pending. Use its confirmation controls or !cancel; ordinary messages cannot change the publication.'
         : 'A task is running in this bot. Only messages in its active conversation can steer it; wait before resetting or starting another conversation.');
       return;
@@ -174,7 +182,7 @@ export class Bridge {
     }, o.timeoutMs);
     try {
       if (verb === 'publish') await reply('Preparing the complete publication review…');
-      else if (verb === 'codex' || verb === 'claude') await reply('Working on it…');
+      else if (!feedback && (verb === 'codex' || verb === 'claude')) await reply('Working on it…');
       let next: Followup | undefined = { prompt, event, attachments: await this.receive(room, event, current) };
       while (next) {
         controller.signal.throwIfAborted();
@@ -244,6 +252,14 @@ export class Bridge {
   private async handleReaction(room: string, event: MatrixEvent): Promise<void> {
     const o = this.options, current = this.active;
     const relation = event.content?.['m.relates_to'];
+    if (feedbackMeaning(relation?.key)) {
+      if (this.stopped || o.isStopping?.() || o.kind === 'manager' || !o.reactionTarget ||
+        !Number.isFinite(event.origin_server_ts) || event.origin_server_ts! < o.since) return;
+      const feedback = await reactionFeedback(room, event, { botId: o.botId, authorized: o.isAuthorized,
+        privateRoom: o.isPrivateRoom, read: o.reactionTarget });
+      if (feedback) await this.handleMessage(room, feedback, true);
+      return;
+    }
     if (this.stopped || o.isStopping?.() || !current || current.failed || current.room !== room || current.sender !== event.sender ||
       !event.event_id || !Number.isFinite(event.origin_server_ts) || event.origin_server_ts! < o.since ||
       relation?.rel_type !== 'm.annotation' || !relation.event_id || !['✅', '❌', '✅\uFE0F', '❌\uFE0F'].includes(relation.key || '') ||
@@ -271,7 +287,7 @@ export class Bridge {
     return [file];
   }
 
-  private async steer(active: Active, room: string, event: MatrixEvent, prompt: string): Promise<void> {
+  private async steer(active: Active, room: string, event: MatrixEvent, prompt: string, feedback = false): Promise<void> {
     const o = this.options;
     if (active.buffered + active.followups.length >= 10) { await o.reply(room, event, 'Too many pending messages. Wait for the agent to catch up.'); return; }
     active.buffered++;
@@ -284,7 +300,7 @@ export class Bridge {
       const accepted = active.running && await o.steer!(prompt, active.key, active.controller.signal, active.sender, attachments);
       if (!accepted) active.followups.push({ prompt, event, attachments });
       try {
-        await o.reply(room, event, accepted ? 'Added your message to the current task.' : o.queuedUpdateMessage || 'The current task is finishing. Your message will be processed next.');
+        if (!feedback) await o.reply(room, event, accepted ? 'Added your message to the current task.' : o.queuedUpdateMessage || 'The current task is finishing. Your message will be processed next.');
       } catch (error) { o.report(error); }
     }).catch(async error => {
       o.report(error);

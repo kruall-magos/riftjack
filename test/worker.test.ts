@@ -112,13 +112,13 @@ test('Grok room messages are durable and reset changes conversation identity whi
 });
 
 test('worker sync checkpoints only after inbox commit and retains the old checkpoint on failure', async t => {
-  for (const fail of [false, true]) {
+  for (const fail of [false, true]) for (const reaction of [false, true]) {
     const file = join(directory(t), 'matrix.json'), storage = new SimpleFsStorageProvider(file);
     storage.setSyncToken('previous');
     class Client extends WorkerMatrixClient {
       run() { return this.startSyncInternal(); }
       protected override async doSync() { return { next_batch: 'next' }; }
-      protected override async processSync(_raw: any, emit: any) { await emit('room.message', '!dm:test', event()); this.stop(); }
+      protected override async processSync(_raw: any, emit: any) { await emit(reaction ? 'room.event' : 'room.message', '!dm:test', reaction ? { ...event(), type: 'm.reaction' } : event()); this.stop(); }
     }
     const client = new Client('https://matrix.test', 'synthetic-token', storage);
     let fatal = false; client.on('worker.inbox_failure', () => { fatal = true; });

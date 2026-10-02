@@ -4,17 +4,26 @@ import { isMedia } from './media.js';
 import type { State } from './state.js';
 import type { WorkerQueue } from './worker-queue.js';
 import type { WorkerService } from './worker-service.js';
+import { reactionFeedback, type ReactionReader } from './reaction-feedback.js';
 
 export class WorkerBridge {
   private stopped = false;
   constructor(private options: { botId: string; authorized: (sender: string) => boolean;
     privateRoom: (room: string, sender: string) => Promise<boolean>; queue: WorkerQueue;
+    reactionTarget?: ReactionReader;
     service: WorkerService; state: State; reply: (room: string, event: MatrixEvent, text: string) => Promise<void> }) {}
   get busy() { return this.options.service.busy; }
   stop() { this.stopped = true; this.options.service.stop(); }
   revoke(sender: string) { this.options.queue.cancelWhere(task => task.event.sender === sender); }
   async handle(room: string, event: MatrixEvent) {
     const o = this.options;
+    if (event.type === 'm.reaction') {
+      if (this.stopped || !o.reactionTarget) return;
+      const feedback = await reactionFeedback(room, event, { botId: o.botId, authorized: o.authorized,
+        privateRoom: o.privateRoom, read: o.reactionTarget });
+      if (!feedback) return;
+      event = feedback;
+    }
     if (this.stopped || event.type !== 'm.room.message' || !event.event_id || !event.sender ||
       event.sender === o.botId || !o.authorized(event.sender) || !event.content ||
       (event.content.msgtype !== 'm.text' && !isMedia(event.content.msgtype)) ||

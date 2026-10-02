@@ -16,6 +16,12 @@ Text messages beginning with `!` (after trimming whitespace and removing Matrix 
 
 Coding bots have separate sessions and use their saved workspace, or `RIFTJACK_WORKSPACE` when none was selected. Coding bots run in parallel without a shared lock; each bot still handles one task per conversation. If two bots edit the same file at the same time, one may overwrite the other's changes. Codex runs use `workspace-write` (or `read-only`) and disabled sandbox network/web search. `CODEX_APPROVAL_POLICY` defaults to `on-request`: Codex may request an exception, which is sent to Matrix for explicit approval. Set it to `never` to deny command/file/permission escalations instead. Approvals are routed to the user, not an automatic reviewer. Existing Codex configuration, managed restrictions, MCP tools, and local filesystem readability still apply; use a dedicated OS account/container if stronger isolation is needed. Connector tokens are excluded from both engines' subprocess environments.
 
+## Reactions
+
+React to an agent's ordinary text message with 👍 for approval of what it said, 👎 for negative feedback, or ❤️ for something you especially liked. Thumb skin tones and text/emoji heart variants are supported. Riftjack passes the reaction and an excerpt of the original message to the agent immediately, in that message's conversation and thread. An idle Codex or Claude starts a turn; a busy agent uses the normal steering or follow-up path. Grok receives the feedback through its durable worker queue. There is no separate acknowledgement message for feedback.
+
+Only reactions from an authorized conversation partner to that bot's text messages are forwarded. Reactions to notices, confirmations, other people's messages and unsupported emoji are ignored. The normal busy/publication rules still apply. Repeated delivery of the same reaction event is deduplicated. Removing a reaction does not retract feedback already delivered to the agent. Reactions convey feedback, not permission for commands or publication; confirmation controls remain ✅ and ❌ on the specific pending request.
+
 ## Messages during work
 
 Claude queues messages from the active conversation as follow-ups; they run after the current step completes. They do not interrupt an in-flight call. See [Claude Code](claude.md#files-and-follow-up-messages).

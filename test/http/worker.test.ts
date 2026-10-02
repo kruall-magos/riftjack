@@ -9,6 +9,8 @@ import { join } from 'node:path';
 import { WorkerQueue } from '../../src/worker-queue.js';
 import { WorkerService } from '../../src/worker-service.js';
 import { WorkerServer } from '../../src/worker-server.js';
+import { WorkerBridge } from '../../src/worker-bridge.js';
+import { State } from '../../src/state.js';
 
 const event = (id = '$one', body = 'hello') => ({ type: 'm.room.message', event_id: id, sender: '@alice:test', origin_server_ts: 1000, content: { msgtype: 'm.text', body } });
 function directory(t: { after(fn: () => void): void }) {
@@ -53,4 +55,15 @@ test('worker HTTP API authenticates per bot, supports long polling, and validate
   assert.equal(JSON.parse((await cli('reply', taskFile, '--text-file', replyFile)).stdout).status, 'replied');
   await idle(service);
   assert.equal(JSON.parse((await cli('status', taskFile)).stdout).status, 'delivered');
+  const bridge = new WorkerBridge({ botId: '@grok:test', authorized: sender => sender === '@alice:test', privateRoom: async () => true,
+    queue, service, state: new State(join(dir, 'state.json')), reply: async () => assert.fail('No acknowledgement for reactions'),
+    reactionTarget: async () => ({ type: 'm.room.message', event_id: '$answer', sender: '@grok:test',
+      content: { msgtype: 'm.text', body: 'Earlier worker answer.', 'm.relates_to': { rel_type: 'm.thread', event_id: '$thread' } } }),
+  });
+  await bridge.handle('!dm:test', { type: 'm.reaction', event_id: '$like', sender: '@alice:test', origin_server_ts: 1000,
+    content: { 'm.relates_to': { rel_type: 'm.annotation', event_id: '$answer', key: '❤️' } } });
+  const feedback = (await (await request()).json()).task;
+  assert.match(feedback.text, /especially liked/); assert.match(feedback.text, /Earlier worker answer/);
+  assert.ok(feedback.conversation.includes('$thread'));
+
 });
