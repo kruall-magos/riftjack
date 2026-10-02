@@ -3,7 +3,7 @@ import sanitizeHtml from 'sanitize-html';
 import { Parser } from 'htmlparser2';
 import { messageParts } from './bridge.js';
 
-type Content = { msgtype: 'm.notice'; body: string; format?: 'org.matrix.custom.html'; formatted_body?: string };
+type Content = { msgtype: 'm.text' | 'm.notice'; body: string; format?: 'org.matrix.custom.html'; formatted_body?: string };
 const escape = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 // Visible text of inline Markdown: formatting marks are dropped and link targets kept in brackets.
 function plainText(tokens: Token[]): string {
@@ -97,17 +97,17 @@ function render(text: string): string {
 
 // Split rendered HTML, not Markdown source: reopen the enclosing tags in each
 // chunk so code fences, emphasis and lists survive Matrix's event-size limit.
-function splitHtml(html: string): Content[] {
+function splitHtml(html: string, msgtype: Content['msgtype']): Content[] {
   const parts: Content[] = [];
   const stack: { name: string; open: string; href?: string; label?: string; next?: number }[] = [];
   let formatted = '', body = '', bytes = 0, points = 0, content = false;
   const closeTags = () => stack.map(tag => `</${tag.name}>`).reverse().join('');
   const flush = () => {
     if (!content) return;
-    const message: Content = { msgtype: 'm.notice', body, format: 'org.matrix.custom.html', formatted_body: formatted + closeTags() };
+    const message: Content = { msgtype, body, format: 'org.matrix.custom.html', formatted_body: formatted + closeTags() };
     // Leave space for Matrix metadata and the overhead of encrypted transport.
     if (Buffer.byteLength(JSON.stringify(message)) <= 36_000) parts.push(message);
-    else parts.push(...messageParts(body).map(body => ({ msgtype: 'm.notice' as const, body })));
+    else parts.push(...messageParts(body).map(body => ({ msgtype, body })));
     formatted = stack.map(tag => tag.open).join(''); body = ''; points = 0; content = false;
     bytes = Buffer.byteLength(JSON.stringify(formatted)) + Buffer.byteLength(closeTags());
   };
@@ -158,13 +158,13 @@ function splitHtml(html: string): Content[] {
   return parts;
 }
 
-export function replyContent(text: string, formatted = false, truncate = true): Content[] {
-  if (!formatted) return messageParts(text).map(body => ({ msgtype: 'm.notice', body }));
+export function replyContent(text: string, formatted = false, truncate = true, msgtype: Content['msgtype'] = 'm.notice'): Content[] {
+  if (!formatted) return messageParts(text).map(body => ({ msgtype, body }));
   const chars = Array.from(text);
   const source = truncate ? chars.slice(0, 100_000).join('') : text;
   let html: string;
   try { html = render(source); } catch { html = `<pre><code>${escape(source)}</code></pre>`; }
-  const parts = splitHtml(html);
-  if (truncate && chars.length > 100_000) parts.push({ msgtype: 'm.notice', body: '[Response truncated at 100,000 characters.]' });
+  const parts = splitHtml(html, msgtype);
+  if (truncate && chars.length > 100_000) parts.push({ msgtype, body: '[Response truncated at 100,000 characters.]' });
   return parts;
 }

@@ -130,18 +130,22 @@ for (const kind of ['codex', 'claude', 'manager'] as const) test(kind + ' DMs wo
 });
 
 for (const kind of ['codex', 'claude', 'manager'] as const) test(kind + ' formats task replies and all help responses', async t => {
-  const replies: { text: string; markdown: boolean }[] = [];
+  const replies: { text: string; markdown: boolean; msgtype: string }[] = [];
   const f = fixture(t, kind, undefined, true, {
-    reply: async (_room, _event, text, markdown = false) => { replies.push({ text, markdown }); },
+    reply: async (_room, _event, text, markdown = false, msgtype = 'm.notice') => { replies.push({ text, markdown, msgtype }); },
   });
   await f.bridge.handle('!dm:test', event('Hello'));
   assert.equal(replies.at(-1)!.markdown, true);
+  assert.equal(replies.at(-1)!.msgtype, 'm.text');
+  assert.ok(replies.slice(0, -1).every(reply => reply.msgtype === 'm.notice'));
   assert.ok(replies.slice(0, -1).every(reply => !reply.markdown));
   await f.bridge.handle('!dm:test', event('!help', '$help-format'));
   assert.equal(replies.at(-1)!.markdown, true);
+  assert.equal(replies.at(-1)!.msgtype, 'm.notice');
   await f.bridge.handle('!dm:test', event('x'.repeat(16_001), '$long-help-format'));
   assert.equal(replies.at(-1)!.markdown, true);
   assert.match(replies.at(-1)!.text, /Help/);
+  assert.equal(replies.at(-1)!.msgtype, 'm.notice');
 });
 
 for (const kind of ['codex', 'claude', 'manager'] as const) test(kind + ' rejects unknown or malformed bang commands locally', async t => {

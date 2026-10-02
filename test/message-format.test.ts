@@ -152,7 +152,9 @@ for (const length of [390, 400]) test(`plain fallback URLs stay with labels (${l
 test('operational messages remain literal, and oversized replies are truncated safely', () => {
   const literal = '**Confirm**: echo `pwd`\n!approve';
   assert.deepEqual(replyContent(literal), [{ msgtype: 'm.notice', body: literal }]);
-  const parts = replyContent('😀'.repeat(100_001), true);
+  assert.deepEqual(replyContent(literal, false, true, 'm.text'), [{ msgtype: 'm.text', body: literal }]);
+  const parts = replyContent('😀'.repeat(100_001), true, true, 'm.text');
+  assert.ok(parts.every(part => part.msgtype === 'm.text'));
   assert.match(parts.at(-1)!.body, /truncated/);
   assert.equal(parts.slice(0, -1).map(part => part.body).join('').trim().length, 200_000);
 });

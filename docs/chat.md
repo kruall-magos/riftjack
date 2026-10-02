@@ -2,7 +2,7 @@
 
 Use ordinary messages for tasks and connector commands for session controls. A command is handled locally; it does not spend a model turn.
 
-Bot messages appear without quoting the message that triggered them. Messages, confirmations and attachments sent within a Matrix thread stay in that thread.
+Agent responses use ordinary Matrix text messages (`m.text`). Connector status, errors, help and confirmations use notices (`m.notice`), which some clients mark with an information icon. Bot messages appear without quoting the message that triggered them. Messages, confirmations and attachments sent within a Matrix thread stay in that thread.
 
 [Back to Riftjack](../README.md)
 

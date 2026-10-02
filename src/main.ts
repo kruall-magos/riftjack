@@ -184,7 +184,7 @@ async function main() {
           const authorize = async () => {
             if (stopping || !(await privateRoom(task.room, task.event.sender!))) throw new PublicError('Worker reply withheld because access or room privacy changed.');
           };
-          const contents: Record<string, unknown>[] = task.response!.text ? replyContent(task.response!.text, true, false) : [];
+          const contents: Record<string, unknown>[] = task.response!.text ? replyContent(task.response!.text, true, false, 'm.text') : [];
           for (const file of task.response!.files) contents.push(await media.prepareAttachment({ ...file, root: join(workerDir, 'uploads') }, AbortSignal.timeout(config.mediaUploadTimeoutMs), authorize));
           const encrypted: unknown[] = [];
           for (const content of contents) {
@@ -309,9 +309,9 @@ async function main() {
           report: diagnostics,
         }, markdown);
       },
-      async reply(room, event, text, markdown = false) {
+      async reply(room, event, text, markdown = false, msgtype = 'm.notice') {
         const replyTo = threadRelation(event);
-        for (const content of replyContent(text, markdown)) {
+        for (const content of replyContent(text, markdown, true, msgtype)) {
           if (!(await privateRoom(room, event.sender!))) throw new PublicError('Reply withheld because this is no longer an encrypted DM with an allowed account.');
           await client.sendMessage(room, { ...content, 'm.relates_to': replyTo });
         }

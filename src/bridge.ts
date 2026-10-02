@@ -25,7 +25,7 @@ type Options = {
   owner?: string;
   isStopping?: () => boolean;
   restart?: (reply: (text: string) => Promise<void>, target: RestartTarget, scope: RestartScope) => Promise<void>;
-  reply: (room: string, event: MatrixEvent, text: string, markdown?: boolean) => Promise<void>;
+  reply: (room: string, event: MatrixEvent, text: string, markdown?: boolean, msgtype?: 'm.text' | 'm.notice') => Promise<void>;
   confirmation?: (room: string, event: MatrixEvent, text: string, controls: ReactionControls, markdown: string) => Promise<void>;
   receive?: (event: MatrixEvent, key: string, signal: AbortSignal) => Promise<IncomingAttachment>;
   acceptManagerAvatar?: (prompt: string, sender: string) => boolean;
@@ -213,7 +213,7 @@ export class Bridge {
         try { result = await task; } finally { turnLifetime.abort(); current.running = false; current.interactions.close(); }
         while (current.buffered) await current.steering;
         controller.signal.throwIfAborted();
-        const respond = (text: string) => o.reply(room, next!.event, text, !next!.prompt.startsWith('!'));
+        const respond = (text: string) => o.reply(room, next!.event, text, !next!.prompt.startsWith('!'), next!.prompt.startsWith('!') ? 'm.notice' : 'm.text');
         if (typeof result === 'string') {
           await respond(result || 'The task completed without a text response.');
         } else {
