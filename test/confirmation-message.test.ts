@@ -14,6 +14,7 @@ async function deliver(request: Interaction) {
     (text, controls, markdown) => sendConfirmation(text, controls, {
       authorize: async () => {},
       sendMessage: async content => {
+        assert.equal(content.msgtype, 'm.text');
         assert.equal(interactions.hasReactionTarget('$' + parts.length), false);
         parts.push(content);
         return '$' + parts.length;
@@ -34,7 +35,7 @@ test('command approvals render literal input, headings and compact controls in M
   const reason = 'Read **literal** text <img src=x> &amp;';
   for (const request of [
     codexInteraction({ id: 1, method: 'item/commandExecution/requestApproval', params: { command, cwd, reason } })!,
-    claudeInteraction({ subtype: 'can_use_tool', tool_name: 'Bash', input: { command, description: reason, cwd } })!,
+    claudeInteraction({ subtype: 'can_use_tool', tool_name: 'Bash', decision_reason: reason, input: { command, description: reason, cwd } })!,
   ]) {
     const { html, plain, parts } = await deliver(request);
     assert.ok(parts.every(p => p.format === 'org.matrix.custom.html'));
@@ -45,6 +46,10 @@ test('command approvals render literal input, headings and compact controls in M
     assert.ok(plain.includes(command));
     assert.ok(plain.includes(cwd));
     assert.ok(plain.includes(reason));
+    assert.ok(request.text.includes(`\n\nReason: ${reason}\n\n`));
+    assert.ok(plain.includes(`\n\nReason:\n${reason}\n\nCommand:`));
+    assert.match(html, /<br><br><strong>Reason:<\/strong>/);
+    assert.match(html, /<br><br><strong>Command:<\/strong>/);
     assert.match(html, /<code>!approve [a-f0-9]{12}<\/code>/);
     assert.match(plain, /This request only; no permanent rule/);
     const footer = plain.slice(plain.indexOf('✅ Approve:'));

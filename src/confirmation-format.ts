@@ -1,18 +1,27 @@
 import { inlineCode, markdownText } from './manager-format.js';
 
-type Detail = { label?: string; value: string; code?: boolean };
+type Detail = { label?: string; value: string; code?: boolean; spaced?: boolean };
 
 // Compose both presentations from the same values. Tool input is literal text,
 // never Markdown: even a command containing fences must stay inside its block.
 export function confirmationDetails(details: Detail[]): { text: string; markdown: string } {
+  const separator = (index: number, formatted: boolean): string => {
+    if (!index) return '';
+    if (details[index].spaced || details[index - 1].spaced) {
+      // An explicit Markdown line break keeps a blank line in Matrix clients
+      // that collapse paragraph margins, and in the generated plain fallback.
+      return formatted ? '\n\\\n' : '\n\n';
+    }
+    return formatted ? '\n\n' : '\n';
+  };
   return {
-    text: details.map(({ label, value }) => `${label ? label + ': ' : ''}${value}`).join('\n'),
-    markdown: details.map(({ label, value, code }) => {
-      const title = label ? `**${markdownText(label)}:**\n` : '';
+    text: details.map(({ label, value }, index) => `${separator(index, false)}${label ? label + ': ' : ''}${value}`).join(''),
+    markdown: details.map(({ label, value, code }, index) => {
+      const title = separator(index, true) + (label ? `**${markdownText(label)}:**\n` : '');
       if (!code) return title + markdownText(value);
       const fence = '`'.repeat(Math.max(2, ...(value.match(/`+/g) || []).map(run => run.length)) + 1);
       return `${title}\n${fence}text\n${value}\n${fence}`;
-    }).join('\n\n'),
+    }).join(''),
   };
 }
 

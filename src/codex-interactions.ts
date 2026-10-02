@@ -24,7 +24,7 @@ export function codexInteraction(request: ServerRequest, item?: Record<string, a
   const p = request.params;
   const deny = deniedRequest(request.method);
   if (!deny) return undefined;
-  const reason = typeof p.reason === 'string' ? [{ label: 'Reason', value: p.reason }] : [];
+  const reason = typeof p.reason === 'string' ? [{ label: 'Reason', value: p.reason, spaced: true }] : [];
   switch (request.method) {
     case 'item/commandExecution/requestApproval': {
       const command = p.command || item?.command;
