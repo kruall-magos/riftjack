@@ -29,7 +29,7 @@ const respond = (id, result) => send({ id, result });
 const threadId = 'thread_1', turnId = 'turn_1';
 let prompt = '', instructions = '', updates = [];
 const complete = (text, status = 'completed') => {
-  send({ method: 'item/completed', params: { threadId, turnId, item: { id: 'comment', type: 'agentMessage', text: 'Private commentary', phase: 'commentary' } } });
+  send({ method: 'item/completed', params: { threadId, turnId, item: { id: 'comment', type: 'agentMessage', text: 'Checking the project.', phase: 'commentary' } } });
   send({ method: 'item/completed', params: { threadId, turnId, item: { id: 'answer', type: 'agentMessage', text, phase: 'final_answer' } } });
   send({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status, items: [] } } });
 };
@@ -665,4 +665,14 @@ test('Codex status records CLI-reported values, refreshes on resume and stays co
   assert.equal(f.state.session('key').codexReport!.model, 'resolved-model');
   f.state.reset('key');
   assert.equal(f.state.session('key').codexReport, undefined);
+});
+
+
+test('Codex forwards completed commentary separately from the final response', async t => {
+  const f = setup(t);
+  const updates: string[] = [];
+  const result = await f.backend('codex', 'hello', 'progress-conversation', signal(), '@owner:test', [], undefined, undefined,
+    { progress: async text => { updates.push(text); } });
+  assert.deepEqual(updates, ['Checking the project.']);
+  assert.doesNotMatch(typeof result === 'string' ? result : result.text, /Checking the project/);
 });

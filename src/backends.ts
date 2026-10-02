@@ -11,13 +11,13 @@ type Engine = Backend & { steer: Steer };
 // to route steering to the engine that is running it.
 export function routeBackends(engines: { codex: Engine; claude: Engine }): Engine {
   const active = new Map<string, { kind: 'codex' | 'claude'; sender: string }>();
-  const run: Backend = async (mode, prompt, key, signal, sender, attachments, interact, publish) => {
+  const run: Backend = async (mode, prompt, key, signal, sender, attachments, interact, publish, hooks) => {
     signal.throwIfAborted();
     if (mode === 'manager' || mode === 'grok') throw new Error('This bot uses a dedicated message handler.');
     if (active.has(key)) throw new PublicError('A task is already running in this conversation.');
     const current = { kind: mode, sender };
     active.set(key, current);
-    try { return await engines[mode](mode, prompt, key, signal, sender, attachments, interact, publish); }
+    try { return await engines[mode](mode, prompt, key, signal, sender, attachments, interact, publish, hooks); }
     finally { if (active.get(key) === current) active.delete(key); }
   };
   const steer: Steer = (prompt, key, signal, sender, attachments) => {

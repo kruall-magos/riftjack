@@ -1,3 +1,4 @@
+import { startBackgroundMcp, BACKGROUND_SERVER, backgroundInstructions } from './background-mcp.js';
 import { createHash } from 'node:crypto';
 import type { Config } from './config.js';
 import type { Backend, Steer } from './bridge.js';
@@ -33,7 +34,7 @@ export function createCodexBackend(config: Config, state: State): Backend & { st
   };
   // One task per conversation key in this backend’s configured workspace.
   const tasks = new Map<string, Active>();
-  const run: Backend = async (mode, prompt, key, signal, sender, attachments = [], interact, publish) => {
+  const run: Backend = async (mode, prompt, key, signal, sender, attachments = [], interact, publish, hooks) => {
     signal.throwIfAborted();
     if (mode !== 'codex') throw new Error('Manager requests must use the manager handler.');
     if (tasks.has(key)) throw new PublicError('A task is already running in this conversation.');
@@ -48,8 +49,12 @@ export function createCodexBackend(config: Config, state: State): Backend & { st
       void current.server?.close();
     };
     signal.addEventListener('abort', abort, { once: true });
+    let progress = Promise.resolve();
+    const sentProgress = new Set<string>();
+    let background: Awaited<ReturnType<typeof startBackgroundMcp>> | undefined;
     let publication: Awaited<ReturnType<typeof startPublishMcp>> | undefined;
     try {
+      if (hooks?.background) background = await startBackgroundMcp(hooks.background, signal);
       if (publish && interact && config.sandbox !== 'read-only') publication = await startPublishMcp(publish, signal);
       const outbox = await outboxDirectory(config.workspace, key);
       signal.throwIfAborted();
@@ -59,6 +64,13 @@ export function createCodexBackend(config: Config, state: State): Backend & { st
         if (notification.method === 'turn/started' && p.turn) current.turnId = p.turn.id;
         if ((notification.method === 'item/started' || notification.method === 'item/completed') && p.turnId === current.turnId && p.item) current.items.set(p.item.id, p.item);
         if (notification.method === 'item/completed' && p.turnId === current.turnId && p.item?.type === 'agentMessage') current.messages.set(p.item.id, p.item);
+        if (!current.ended && notification.method === 'item/completed' && p.turnId === current.turnId && p.item?.type === 'agentMessage' &&
+          p.item.phase === 'commentary' && p.item.text && hooks?.progress && !sentProgress.has(p.item.id)) {
+          sentProgress.add(p.item.id);
+          const text = p.item.text;
+          progress = progress.then(() => hooks.progress!(text));
+          void progress.catch(error => current.done.reject(error));
+        }
         if (notification.method === 'turn/completed' && p.turn && (!current.turnId || p.turn.id === current.turnId)) {
           current.turnId = p.turn.id; current.ended = true; current.done.resolve(p.turn);
         }
@@ -84,7 +96,7 @@ export function createCodexBackend(config: Config, state: State): Backend & { st
       }
       const session = state.session(key);
       const saved = session.codex;
-      const instructions = mediaInstructions(outbox, config.maxMediaBytes) + (publication ? publicationInstructions : '');
+      const instructions = mediaInstructions(outbox, config.maxMediaBytes) + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '');
       const instructionsHash = createHash('sha256').update(instructions).digest('hex');
       const options = {
         cwd: config.workspace, sandbox: config.sandbox, approvalPolicy: interact ? config.codexApprovalPolicy : 'never', approvalsReviewer: 'user', modelProvider: 'openai', model: config.codexModel,
@@ -97,6 +109,10 @@ export function createCodexBackend(config: Config, state: State): Backend & { st
             // Invoking this tool starts the review; requestPublish itself requires Matrix
             // approval after delivering the HTML. Avoid an empty MCP consent form first.
             tools: { prepare_publish: { approval_mode: 'approve' } },
+          } : { enabled: false },
+          [`mcp_servers.${BACKGROUND_SERVER}`]: background ? { url: background.url, http_headers: background.headers,
+            required: true, enabled: true, enabled_tools: ['background_tasks'],
+            tools: { background_tasks: { approval_mode: 'approve' } },
           } : { enabled: false },
           ...(config.codexReasoningEffort ? { model_reasoning_effort: config.codexReasoningEffort } : {}),
         },
@@ -125,6 +141,7 @@ export function createCodexBackend(config: Config, state: State): Backend & { st
       if (started.turn.status !== 'inProgress') { current.ended = true; current.done.resolve(started.turn); }
       current.ready.resolve();
       const completed = await current.done.promise;
+      await progress;
       signal.throwIfAborted();
       if (completed.status !== 'completed') throw new PublicError(completed.status === 'interrupted' ? 'Codex task was interrupted.' : 'Codex task failed. Please retry.');
       for (const item of completed.items || []) if (item.type === 'agentMessage') current.messages.set(item.id, item);
@@ -132,7 +149,8 @@ export function createCodexBackend(config: Config, state: State): Backend & { st
       return parseMediaReply(messages.at(-1)?.text || '', outbox);
     } finally {
       current.ended = true;
-      await publication?.close();
+      await progress.catch(() => {});
+      await background?.close(); await publication?.close();
       current.ready.resolve();
       await Promise.allSettled([...current.steering]);
       await current.server?.close();

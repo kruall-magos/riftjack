@@ -33,7 +33,7 @@ See `docs/commit-policy.md` for policy scope and server enforcement.
 
 Run `npm test` and `npm run check` in the normal sandbox; the default test suite
 must not open listening ports. Keep port-opening tests in `test/http/` and run
-them with `npm run test:http` when changing the publication MCP transport or its backend integration, the worker HTTP API, its Python
+them with `npm run test:http` when changing the publication or background-task MCP transport or its backend integration, the worker HTTP API, its Python
 client, queue/service behavior exposed by that API, or related dependencies and
 test infrastructure. Do not request broader permissions for the ordinary suite
 just because HTTP tests exist. `npm run test:all` explicitly runs both suites.

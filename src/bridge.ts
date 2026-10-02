@@ -1,3 +1,4 @@
+import type { BackgroundAction } from './background-tasks.js';
 import type { State } from './state.js';
 import { PublicError } from './accounts.js';
 import { errorMessage } from './errors.js';
@@ -15,7 +16,8 @@ export type MatrixEvent = {
   content?: MediaContent & { 'm.relates_to'?: { rel_type?: string; event_id?: string; key?: string; 'm.in_reply_to'?: { event_id: string } } };
 };
 export type Mode = 'codex' | 'claude' | 'grok' | 'manager';
-export type Backend = (mode: Mode, prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[], interact?: Interact, publish?: PublishAction) => Promise<string | BackendReply>;
+export type BackendHooks = { background?: BackgroundAction; progress?: (text: string) => Promise<void> };
+export type Backend = (mode: Mode, prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[], interact?: Interact, publish?: PublishAction, hooks?: BackendHooks) => Promise<string | BackendReply>;
 export type Steer = (prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[]) => Promise<boolean>;
 type Options = {
   botId: string; isAuthorized: (user: string) => boolean; kind: Mode; since: number; timeoutMs: number;
@@ -34,6 +36,7 @@ type Options = {
   sendAttachments?: (room: string, event: MatrixEvent, files: OutgoingAttachment[], signal: AbortSignal) => Promise<void>;
   status?: (key: string) => string;
   publish?: (input: unknown, signal: AbortSignal, interact: Interact, authorize: () => Promise<void>) => Promise<string>;
+  background?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
   // Account usage and limits of the engine.
   usage?: (signal: AbortSignal) => Promise<string>;
   report: (error: unknown) => void;
@@ -69,7 +72,14 @@ export class Bridge {
     await this.handleMessage(room, event);
   }
 
-  private async handleMessage(room: string, event: MatrixEvent, feedback = false): Promise<void> {
+  async resumeBackground(room: string, event: MatrixEvent, session: string, admitted: () => void): Promise<boolean> {
+    if (this.active || this.stopped || this.options.isStopping?.()) return false;
+    let accepted = false;
+    await this.handleMessage(room, event, true, { session, admitted: () => { admitted(); accepted = true; } });
+    return accepted;
+  }
+
+  private async handleMessage(room: string, event: MatrixEvent, feedback = false, background?: { session: string; admitted: () => void }): Promise<void> {
     const o = this.options;
     if (!event.sender || !o.isAuthorized(event.sender) || event.sender === o.botId) return;
     const media = isMedia(event.content?.msgtype);
@@ -79,7 +89,11 @@ export class Bridge {
     const body = !media && event.content?.['m.relates_to']?.['m.in_reply_to']
       ? event.content.body?.replace(/^>[^\n]*(?:\r?\n>[^\n]*)*\r?\n\r?\n/, '') : event.content?.body;
     const prompt = body?.trim() || (media ? 'An attachment was sent. Describe what you can inspect, or ask what to do with it.' : '');
-    if (!prompt || !(await o.isPrivateRoom(room, event.sender)) || !o.isAuthorized(event.sender) || !o.state.claim(event.event_id)) return;
+    if (!prompt || !(await o.isPrivateRoom(room, event.sender)) || !o.isAuthorized(event.sender)) return;
+    if (background) {
+      if (this.active || this.stopped || o.isStopping?.() || (o.kind !== 'codex' && o.kind !== 'claude') ||
+        o.state.session(sessionKey(room, event))[o.kind] !== background.session) return;
+    } else if (!o.state.claim(event.event_id)) return;
     // Attachments never execute conversation controls. Manager avatar captions are allowed explicitly below.
     const publishCommand = !media && /^!publish(?:\s|$)/.test(prompt);
     const restartSupervisor = !media && /^!restart\s+supervisor$/.test(prompt);
@@ -180,6 +194,7 @@ export class Bridge {
       controller.abort();
     }, o.timeoutMs);
     try {
+      background?.admitted();
       if (verb === 'publish') await reply('Preparing the complete publication review…');
       else if (!feedback && (verb === 'codex' || verb === 'claude')) await reply('…');
       let next: Followup | undefined = { prompt, event, attachments: await this.receive(room, event, current) };
@@ -213,8 +228,23 @@ export class Bridge {
           }
           finally { current.publication = false; }
         } : undefined;
+        const hooks: BackendHooks = {
+          background: o.background ? async (input, callSignal) => {
+            const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
+            signal.throwIfAborted();
+            await this.authorize(room, current);
+            signal.throwIfAborted();
+            return o.background!(input, { room, event: requestEvent, key }, signal);
+          } : undefined,
+          progress: async text => {
+            turnLifetime.signal.throwIfAborted();
+            await this.authorize(room, current);
+            turnLifetime.signal.throwIfAborted();
+            await o.reply(room, requestEvent, text, true, 'm.text');
+          },
+        };
         const task = verb === 'publish' ? o.publish!(publication, controller.signal, interact, () => this.authorize(room, current))
-          : o.run(verb as Mode, next.prompt, key, controller.signal, event.sender, next.attachments, interact, publish);
+          : o.run(verb as Mode, next.prompt, key, controller.signal, event.sender, next.attachments, interact, publish, hooks);
         current.markReady();
         let result: string | BackendReply;
         try { result = await task; } finally { turnLifetime.abort(); current.running = false; current.interactions.close(); }

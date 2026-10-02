@@ -66,6 +66,11 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
   if (prompt.includes('[approval]')) { output({ type: 'control_request', request: { subtype: 'can_use_tool' } }); setInterval(() => {}, 1000); return; }
   if (prompt.includes('[fail]')) { output({ type: 'result', subtype: 'error_during_execution', is_error: true, session_id: 'claude-session-1' }); return; }
   if (prompt.includes('[no-result]')) return;
+  if (prompt.includes('[progress]')) {
+    output({ type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'Not user-facing' }, { type: 'text', text: 'Checking the files.' }, { type: 'tool_use', name: 'Read', input: {} }] } });
+    output({ type: 'assistant', message: { content: [{ type: 'text', text: 'Running the checks.' }] } });
+    output({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: {} }] } });
+  }
   let result = 'Claude answer';
   if (prompt.includes('[attachment]')) {
     const instructions = args[args.indexOf('--append-system-prompt') + 1];
@@ -402,4 +407,14 @@ test('Claude status uses init metadata, preserves unknowns and clears stale fiel
   assert.deepEqual(Object.keys(f.state.session('key').claudeReport!), ['reportedAt']);
   f.state.reset('key');
   assert.equal(f.state.session('key').claudeReport, undefined);
+});
+
+
+test('Claude sends progress around tool use without duplicating final text or exposing thinking', async t => {
+  const f = setup(t);
+  const updates: string[] = [];
+  const result = await f.backend('claude', '[progress]', 'progress-conversation', signal(), '@owner:test', [], undefined, undefined,
+    { progress: async text => { updates.push(text); } });
+  assert.deepEqual(updates, ['Checking the files.', 'Running the checks.']);
+  assert.equal(typeof result === 'string' ? result : result.text, 'Claude answer');
 });

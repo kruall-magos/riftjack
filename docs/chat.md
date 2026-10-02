@@ -16,6 +16,54 @@ Text messages beginning with `!` (after trimming whitespace and removing Matrix 
 
 Coding bots have separate sessions and use their saved workspace, or `RIFTJACK_WORKSPACE` when none was selected. Coding bots run in parallel without a shared lock; each bot still handles one task per conversation. If two bots edit the same file at the same time, one may overwrite the other's changes. Codex runs use `workspace-write` (or `read-only`) and disabled sandbox network/web search. `CODEX_APPROVAL_POLICY` defaults to `on-request`: Codex may request an exception, which is sent to Matrix for explicit approval. Set it to `never` to deny command/file/permission escalations instead. Approvals are routed to the user, not an automatic reviewer. Existing Codex configuration, managed restrictions, MCP tools, and local filesystem readability still apply; use a dedicated OS account/container if stronger isolation is needed. Connector tokens are excluded from both engines' subprocess environments.
 
+## Background task notifications
+
+Codex and Claude can register completion watches with the `background_tasks` tool
+on the `riftjack_tasks` MCP server. This lets a bot return with a result after its
+current turn has ended. The tool watches an existing JSON file inside that bot's
+workspace; it does not start a process or keep one alive.
+
+For example, first create `build-status.json` containing `{"stage":"building"}`,
+then register:
+
+```json
+{"action":"watch","label":"Example build","status_file":"build-status.json","field":"stage","terminal":["complete","failed"],"timeout_hours":24}
+```
+
+Have the background process write a terminal state on both success and failure.
+Prefer writing a temporary file and renaming it over the status file. The selected
+field must be a top-level string; the JSON file must be a regular file of at most
+64 KiB. Only the selected status, label and file path are passed to the agent,
+not the rest of the file. They are supplied as data, not instructions or approvals.
+
+Riftjack checks about every two seconds. Registrations survive connector restarts;
+completion waits until the bot is idle, then starts a turn in the original room,
+thread and agent session. Account access and room privacy are checked again.
+`!reset`, revoked access or a changed workspace cancels pending watches. While
+Riftjack is offline, the producer must leave the terminal state in the file until
+it can be observed. A watch expires after 24 hours by default (configurable from
+1 to 168 hours) and then reports that expiry; this does not mean the process ended.
+
+Use `{"action":"list"}` to inspect this conversation's watches, or
+`{"action":"cancel","id":"WATCH_ID"}` to cancel one. Cancellation stops watching,
+not the background process. `!status` shows waiting and interrupted counts.
+Repeated registration of the same pending file and field returns the existing
+watch; changing terminal states requires cancelling it first. A bot may have up
+to 100 active watches. Recent completed records are retained with a bounded limit.
+
+A notification starts an ordinary agent turn; it can consume the model's usage
+limit and still needs the usual approvals for protected actions. Delivery is
+attempted once. If the connector crashes after admitting the turn, the watch is
+marked `interrupted` on startup and is not automatically replayed: the agent may
+already have acted. Inspect the conversation and saved results before registering
+another watch. The `delivered` state means the notification turn was admitted and
+finished handling; it does not certify that the underlying task or agent succeeded.
+
+These watches are available to Codex and Claude bots. External workers continue
+to use their existing durable task queue; this tool does not monitor arbitrary
+Grok processes. Workspaces remain a filesystem trust boundary, not isolation
+between mutually untrusted host users.
+
 ## Reactions
 
 React to an agent's ordinary text message with 👍 for agreement, 👎 for negative feedback, or ❤️ for strong appreciation or support. Reactions are interpreted in the context of the message and ongoing agreements. On a concrete proposed next step within the agreed work, either 👍 or ❤️ can mean “yes, go ahead”: the agent is instructed to continue that work. A reaction to a completed result or a personal remark may simply express appreciation; it does not require inventing a new task. Thumb skin tones and text/emoji heart variants are supported. Riftjack passes the reaction and an excerpt of the original message to the agent immediately, in that message's conversation and thread. An idle Codex or Claude starts a turn; a busy agent uses the normal steering or follow-up path. Grok receives the feedback through its durable worker queue. There is no separate acknowledgement message for feedback.
@@ -75,6 +123,8 @@ The connector reads the plugin description, apps and MCP servers from `openai-cu
 ## Delivery and formatting
 
 Messages sent before the current startup are ignored, including messages sent while the connector was offline. Duplicate events are recorded before work begins to reduce accidental re-execution. An interrupted task is not automatically replayed after restart. Tasks time out after 24 hours by default. Replies are chunked, with a 100,000-character cap.
+
+Coding bots also forward user-facing progress messages while a task runs. Codex sends completed `commentary` messages; Claude sends assistant text preceding tool use or a later assistant response. Thinking blocks and tool internals are not forwarded, and the final response is sent separately.
 
 Coding bots render Markdown replies as sanitized Matrix HTML (`format: org.matrix.custom.html` and `formatted_body`), with a readable plain-text fallback. Element X can display emphasis, links, lists and code blocks without showing Markdown delimiters. Tables use monospace blocks. Long replies retain balanced formatting across chunks. Raw HTML is displayed literally, and Markdown images become links; file delivery still uses encrypted attachments. Manager replies also use native formatting: bot lists have bold names and code-formatted IDs and folders; help has headings and commands; profile and access updates highlight their outcome. User-supplied names and paths remain literal. Confirmations use headings, highlighted field labels and literal code blocks for commands, paths and changes, with the same readable plain-text fallback. Their short footer lists reactions and commands; IDs are optional when exactly one request is pending. Long confirmation details are split without truncation, and both commands and reactions become actionable only after the entire request is delivered. Operational errors and most coding-bot command responses stay plain text; help, status and usage use formatted replies.
 

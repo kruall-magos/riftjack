@@ -1,3 +1,4 @@
+import { startBackgroundMcp, BACKGROUND_SERVER, BACKGROUND_TOOL, backgroundInstructions } from './background-mcp.js';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { dirname } from 'node:path';
@@ -116,7 +117,7 @@ export function claudeApprovals(config: Config): boolean {
   return config.sandbox !== 'read-only' && config.claudeApprovalPolicy === 'on-request';
 }
 
-export function claudeArguments(config: Config, session?: string, interactive = false, instructions?: string, publication?: PublishConnection): string[] {
+export function claudeArguments(config: Config, session?: string, interactive = false, instructions?: string, publication?: PublishConnection, background?: PublishConnection): string[] {
   const readOnly = config.sandbox === 'read-only';
   const tools = readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash';
   const settings = {
@@ -125,12 +126,16 @@ export function claudeArguments(config: Config, session?: string, interactive = 
   const args = ['--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
     '--permission-mode', readOnly ? 'dontAsk' : 'acceptEdits', '--tools', tools,
     '--settings', JSON.stringify(settings)];
-  if (readOnly) args.push('--allowedTools', 'Read,Glob,Grep');
-  if (publication && !readOnly) {
-    args.push('--mcp-config', JSON.stringify({ mcpServers: { [PUBLISH_SERVER]: {
-      type: 'http', url: publication.url, headers: publication.headers, timeout: config.timeoutMs,
-    } } }), '--allowedTools', PUBLISH_TOOL);
+  const allowed = readOnly ? ['Read', 'Glob', 'Grep'] : [];
+  const servers: Record<string, object> = {};
+  for (const [name, connection, tool] of [[PUBLISH_SERVER, !readOnly && publication, PUBLISH_TOOL],
+    [BACKGROUND_SERVER, background, BACKGROUND_TOOL]] as const) {
+    if (!connection) continue;
+    servers[name] = { type: 'http', url: connection.url, headers: connection.headers, timeout: config.timeoutMs };
+    allowed.push(tool);
   }
+  if (Object.keys(servers).length) args.push('--mcp-config', JSON.stringify({ mcpServers: servers }));
+  if (allowed.length) args.push('--allowedTools', allowed.join(','));
   // Permission prompts arrive as stream-json control requests and are answered in Matrix.
   if (interactive) args.push('--permission-prompt-tool', 'stdio');
   if (config.claudeModel) args.push('--model', config.claudeModel);
@@ -160,7 +165,7 @@ export function createClaudeBackend(config: Config, state: State): Backend & { s
   const run: Backend = async (...args) => {
     try { return await turn(...args); } catch (error) { checked = false; throw error; }
   };
-  const turn: Backend = async (mode, prompt, key, signal, sender, attachments = [], interact, publish) => {
+  const turn: Backend = async (mode, prompt, key, signal, sender, attachments = [], interact, publish, hooks) => {
     if (mode !== 'claude') throw new Error('Claude backend received the wrong bot kind.');
     signal.throwIfAborted();
     if (!checked) { await checkClaude(config, signal); checked = true; }
@@ -168,6 +173,16 @@ export function createClaudeBackend(config: Config, state: State): Backend & { s
     const input = await claudeInput(prompt, attachments, config);
     let result: string | undefined;
     let assistantText = '';
+    let pendingProgress = '';
+    let progress = Promise.resolve();
+    const flushProgress = () => {
+      if (pendingProgress && hooks?.progress) {
+        const text = pendingProgress;
+        progress = progress.then(() => hooks.progress!(text));
+        void progress.catch(() => {});
+      }
+      pendingProgress = '';
+    };
     let sessionId: string | undefined;
     const interactive = !!interact && claudeApprovals(config);
     // Open confirmations by Claude request ID; aborted when Claude withdraws them or the turn ends.
@@ -175,11 +190,13 @@ export function createClaudeBackend(config: Config, state: State): Backend & { s
     const close = () => { for (const controller of pending.values()) controller.abort(); pending.clear(); };
     const answer = (stdin: ClaudeInput, requestId: string, response: object) =>
       stdin.write({ type: 'control_response', response: { subtype: 'success', request_id: requestId, response } });
+    let background: Awaited<ReturnType<typeof startBackgroundMcp>> | undefined;
     let publication: Awaited<ReturnType<typeof startPublishMcp>> | undefined;
     try {
+      if (hooks?.background) background = await startBackgroundMcp(hooks.background, signal);
       if (publish && interact && config.sandbox !== 'read-only') publication = await startPublishMcp(publish, signal);
       await runClaude(config, claudeArguments(config, state.session(key).claude, interactive,
-        mediaInstructions(outbox, config.maxMediaBytes) + (publication ? publicationInstructions : ''), publication), signal, (line, stdin) => {
+        mediaInstructions(outbox, config.maxMediaBytes) + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : ''), publication, background), signal, (line, stdin) => {
       let message: any;
       try { message = JSON.parse(line); } catch { throw new PublicError('Claude Code returned invalid stream-json output. Check its installed version.'); }
       if (typeof message.session_id === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(message.session_id)) {
@@ -197,6 +214,7 @@ export function createClaudeBackend(config: Config, state: State): Backend & { s
         return;
       }
       if (message.type === 'control_request') {
+        flushProgress();
         if (!interactive) throw new PublicError('Claude requested interactive permission. Configure its permissions on the host; the connector does not bypass approval checks.');
         const requestId = message.request_id;
         if (typeof requestId !== 'string' || !requestId || pending.has(requestId)) throw new PublicError('Claude Code sent an invalid permission request.');
@@ -217,14 +235,19 @@ export function createClaudeBackend(config: Config, state: State): Backend & { s
         return;
       }
       if (message.type === 'assistant' && Array.isArray(message.message?.content)) {
+        flushProgress();
         assistantText = message.message.content.filter((block: any) => block.type === 'text' && typeof block.text === 'string').map((block: any) => block.text).join('\n');
+        pendingProgress = assistantText;
+        if (message.message.content.some((block: any) => block.type === 'tool_use')) flushProgress();
       }
       if (message.type === 'result') {
         if (message.is_error || message.subtype !== 'success') throw new PublicError('Claude could not complete the task. Check your Claude account limits, permissions and login on the host.');
         result = typeof message.result === 'string' ? message.result : assistantText;
         close(); stdin.end();
       }
-    }, input, interactive); } finally { close(); await publication?.close(); }
+    }, input, interactive);
+      await progress;
+    } finally { close(); await progress.catch(() => {}); await background?.close(); await publication?.close(); }
     signal.throwIfAborted();
     if (result === undefined || !sessionId) throw new PublicError('Claude exited without a complete result and session ID. Please retry after checking its installed version.');
     return parseMediaReply(result, outbox);

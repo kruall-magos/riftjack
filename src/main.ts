@@ -1,3 +1,4 @@
+import { BackgroundTasks } from './background-tasks.js';
 import { mkdirSync, openSync, closeSync, readFileSync, unlinkSync, writeFileSync, existsSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
@@ -116,6 +117,9 @@ async function main() {
   const clients = new Map<string, { client: MatrixClient; bridge: Bridge | WorkerBridge; privateRoom: (room: string, sender: string) => Promise<boolean> }>();
   const workerServer = new WorkerServer();
   const workers = new Map<string, WorkerService>();
+  const backgroundPumps = new Map<string, () => Promise<void>>();
+  const backgroundTimer = setInterval(() => { for (const pump of backgroundPumps.values()) void pump().catch(diagnostics); }, 2000);
+  backgroundTimer.unref();
   const workerTimer = setInterval(() => { for (const worker of workers.values()) void worker.deliver(); }, 2000);
   workerTimer.unref();
   const botInvitations = new BotInvitations(join(config.dataDir, 'bot-dms.json'));
@@ -130,6 +134,7 @@ async function main() {
     stopping = true;
     clearInterval(restartNoticeTimer);
     clearInterval(workerTimer);
+    clearInterval(backgroundTimer);
     for (const { client, bridge } of clients.values()) { bridge.stop(); client.stop(); }
     void Promise.all([tunnel?.stop(), workerServer.stop(), new Promise(resolve => setTimeout(resolve, 1500))])
       .then(() => process.exit(code));
@@ -150,6 +155,7 @@ async function main() {
     const backend = createBackend(botConfig, state);
     const dir = join(config.dataDir, 'bots', createHash('sha256').update(account.userId).digest('hex'));
     mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const background = account.kind === 'codex' || account.kind === 'claude' ? new BackgroundTasks(join(dir, 'background-tasks.json'), botConfig.workspace) : undefined;
     const storage = new SimpleFsStorageProvider(join(dir, 'matrix.json'));
     const crypto = new RustSdkCryptoStorageProvider(join(dir, 'crypto'), StoreType.Sqlite);
     if (account.kind === 'grok' && !config.workerPort) throw new PublicError('Set WORKER_PORT to enable the Grok worker connection.');
@@ -228,17 +234,24 @@ async function main() {
       since: Date.now(), timeoutMs: config.timeoutMs, state, report: diagnostics,
       publish: (account.kind === 'codex' || account.kind === 'claude') && botConfig.sandbox !== 'read-only'
         ? (input, signal, interact, authorize) => requestPublish(input, botConfig.workspace, botConfig.dataDir, botConfig.maxMediaBytes, signal, interact, authorize) : undefined,
+      background: background ? async (input, { room, event, key }, signal) => {
+        const session = state.session(key)[account.kind as 'codex' | 'claude'];
+        if (!session) throw new PublicError('The agent session is not ready for a background watch.');
+        const relation = event.content?.['m.relates_to'];
+        return background.action(input, { room, sender: event.sender!, key, session,
+          thread: relation?.rel_type === 'm.thread' ? relation.event_id : undefined }, signal);
+      } : undefined,
       status: account.kind === 'codex' || account.kind === 'claude'
-        ? key => botStatus(account.kind as 'codex' | 'claude', botConfig, state.session(key)) : undefined,
+        ? key => botStatus(account.kind as 'codex' | 'claude', botConfig, state.session(key)) + (background?.summary(key, state.session(key)[account.kind as 'codex' | 'claude']) || '') : undefined,
       usage: account.kind === 'claude' ? async signal => formatClaudeUsage(await claudeUsage(botConfig, signal))
         : account.kind === 'codex' ? signal => codexUsage(botConfig, signal) : undefined,
       acceptManagerAvatar: (prompt, sender) => {
         const request = parseProfileRequest(prompt);
         return request?.action === 'avatar' && !!resolveProfileTarget(accounts, request.userId, sender, access.owner);
       },
-      async run(mode, prompt, key, signal, sender, attachments, interact, publish) {
+      async run(mode, prompt, key, signal, sender, attachments, interact, publish, hooks) {
         // Coding bots never interpret account-management commands.
-        if (account.kind !== 'manager' || mode !== 'manager') return backend(mode, prompt, key, signal, sender, attachments, interact, publish);
+        if (account.kind !== 'manager' || mode !== 'manager') return backend(mode, prompt, key, signal, sender, attachments, interact, publish, hooks);
         const profileRequest = parseProfileRequest(prompt);
         if (profileRequest) return updateBotProfile(profileRequest, {
           accounts, owner: access.owner, sender, signal, attachments: attachments ?? [], maxBytes: config.maxMediaBytes,
@@ -336,7 +349,19 @@ async function main() {
       if (event.sender && authorized(event.sender)) void client.joinRoom(room).catch(diagnostics);
     });
     client.on('room.failed_decryption', () => console.warn(account.name + ': message could not be decrypted. Check device trust and key sharing in Element.'));
+    let online = false;
     clients.set(account.userId, { client, bridge, privateRoom });
+    if (background && bridge instanceof Bridge) {
+      const codingBridge = bridge;
+      backgroundPumps.set(account.userId, async () => {
+        if (!online || starting || stopping || restart.pending || !clients.has(account.userId)) return;
+        await background.pump({
+          valid: target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude'] === target.session,
+          deliver: (target, event, admitted) => codingBridge.resumeBackground(target.room, event, target.session, admitted),
+          report: diagnostics,
+        });
+      });
+    }
     try {
       if (!account.roomId) {
         const recipient = account.inviteUserId || config.owner;
@@ -360,6 +385,7 @@ async function main() {
         diagnostics(error);
       }
       await client.start();
+      online = true;
       console.log(account.name + ' (' + account.kind + ') online: ' + account.userId);
     } catch (error) { client.stop(); clients.delete(account.userId); workers.get(account.userId)?.stop(); workers.delete(account.userId); workerServer.remove(account.userId); throw error; }
   }
