@@ -28,14 +28,16 @@ function deferred() {
 }
 
 test('thumbs and hearts carry feedback about the exact message and its original thread', async () => {
-  for (const [emoji, meaning] of [['👍', 'approval'], ['👍🏽', 'approval'], ['👎', 'negative'], ['👎🏻', 'negative'], ['❤️', 'especially'], ['❤', 'especially'], ['♥️', 'especially']]) {
+  for (const [emoji, meaning] of [['👍', 'agreement'], ['👍🏽', 'agreement'], ['👎', 'negative'], ['👎🏻', 'negative'], ['❤️', 'especially'], ['❤', 'especially'], ['♥️', 'especially']]) {
     const result = await reactionFeedback(room, reaction(emoji), options(target('$thread')));
     assert.ok(result); assert.equal(result.event_id, '$reaction');
     assert.equal(payload(result).reaction, emoji); assert.match(payload(result).meaning, new RegExp(meaning));
     assert.equal(payload(result).message, 'An earlier answer.');
     assert.equal(result.content!['m.relates_to']!.event_id, '$thread');
     assert.equal(sessionKey(room, result), sessionKey(room, { ...message(), content: { 'm.relates_to': { rel_type: 'm.thread', event_id: '$thread' } } }));
-    assert.match(result.content!.body!, /not permission/);
+    assert.match(result.content!.body!, /continue the agreed work/);
+    assert.match(result.content!.body!, /do not answer pending confirmation requests or replace required approvals/);
+    assert.doesNotMatch(result.content!.body!, /Respond briefly|not permission to run commands/);
   }
   assert.equal((await reactionFeedback(room, reaction(), options()))!.content!['m.relates_to'], undefined);
   for (const emoji of ['✅', '❌', '👍 !approve', '🚀', '', undefined]) assert.equal(feedbackMeaning(emoji), undefined);
@@ -131,7 +133,7 @@ test('Grok feedback enters the durable worker queue in the target thread and ded
   const bridge = new WorkerBridge(config);
   await bridge.handle(room, reaction('👍')); await bridge.handle(room, reaction('👍'));
   assert.equal(queue.list().length, 1);
-  const task = queue.list()[0]; assert.match(task.event.content!.body!, /approval of what was said/);
+  const task = queue.list()[0]; assert.match(task.event.content!.body!, /yes, go ahead/);
   assert.ok(task.conversation.startsWith(JSON.stringify([room, owner, '$thread']) + '\n'));
   queue.close(); queue = new WorkerQueue(path);
   await new WorkerBridge({ ...config, queue }).handle(room, reaction('👍'));
