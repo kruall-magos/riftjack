@@ -177,7 +177,7 @@ export function createClaudeBackend(config: Config, state: State): Backend & { s
       stdin.write({ type: 'control_response', response: { subtype: 'success', request_id: requestId, response } });
     let publication: Awaited<ReturnType<typeof startPublishMcp>> | undefined;
     try {
-      if (publish && interact && sender === config.owner && config.sandbox !== 'read-only') publication = await startPublishMcp(publish, signal);
+      if (publish && interact && config.sandbox !== 'read-only') publication = await startPublishMcp(publish, signal);
       await runClaude(config, claudeArguments(config, state.session(key).claude, interactive,
         mediaInstructions(outbox, config.maxMediaBytes) + (publication ? publicationInstructions : ''), publication), signal, (line, stdin) => {
       let message: any;

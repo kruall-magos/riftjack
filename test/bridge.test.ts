@@ -659,11 +659,12 @@ test('!status respects room privacy and unsupported bots', async t => {
   assert.deepEqual(manager.calls, []);
 });
 
-for (const kind of ['codex', 'claude'] as const) test(`reviewed publication (${kind}) delivers HTML before enabling approval and never calls a model`, async t => {
+for (const kind of ['codex', 'claude'] as const) for (const sender of ['@owner:test', '@guest:test']) test(`reviewed publication (${kind}, ${sender}) delivers HTML before enabling approval and never calls a model`, async t => {
   const uploadStarted = gate(), uploadFinish = gate(), confirmationStarted = gate();
   let published = false, calls = 0, steers = 0;
   const f = fixture(t, kind, async () => assert.fail('No model request'), true, {
     timeoutMs: 5000,
+    isAuthorized: user => ['@owner:test', '@guest:test'].includes(user),
     publish: async (input, signal, interact, authorize) => {
       calls++;
       assert.deepEqual(input, { repository: '.', remote: 'origin', branch: 'main' });
@@ -674,28 +675,72 @@ for (const kind of ['codex', 'claude'] as const) test(`reviewed publication (${k
     confirmation: async (_room, _event, _text, controls) => { controls.bind('$publish-confirmation'); confirmationStarted.release(); },
     steer: async () => { steers++; return true; },
   });
-  const task = f.bridge.handle('!dm:test', event('!publish {"repository":".","remote":"origin","branch":"main"}', '$publish'));
+  const incoming = (body: string, id: string) => ({ ...event(body, id), sender });
+  const task = f.bridge.handle('!dm:test', incoming('!publish {"repository":".","remote":"origin","branch":"main"}', '$publish'));
   await uploadStarted.promise;
   try {
-    await f.bridge.handle('!dm:test', event('!approve', '$early'));
+    await f.bridge.handle('!dm:test', incoming('!approve', '$early'));
     assert.match(f.replies.at(-1)!, /still being delivered/); assert.equal(published, false);
-    await f.bridge.handle('!dm:test', event('change the request', '$steer'));
+    await f.bridge.handle('!dm:test', incoming('change the request', '$steer'));
     assert.equal(steers, 0);
     uploadFinish.release(); await confirmationStarted.promise;
-    await f.bridge.handle('!elsewhere:test', event('!approve', '$wrong-room'));
+    await f.bridge.handle('!elsewhere:test', incoming('!approve', '$wrong-room'));
     assert.equal(published, false);
-    await f.bridge.handle('!dm:test', event('!approve', '$approved'));
+    const other = sender === '@owner:test' ? '@guest:test' : '@owner:test';
+    await f.bridge.handle('!dm:test', { ...event('!approve', '$wrong-user'), sender: other });
+    await f.bridge.handle('!dm:test', { ...reaction('$publish-confirmation', '✅', '$wrong-reaction'), sender: other });
+    await f.bridge.handle('!dm:test', { ...incoming('!approve', '$wrong-thread'), content: { msgtype: 'm.text', body: '!approve', 'm.relates_to': { rel_type: 'm.thread', event_id: '$different' } } });
+    assert.equal(published, false);
+    await f.bridge.handle('!dm:test', incoming('!approve', '$approved'));
     await task;
     assert.equal(published, true); assert.equal(calls, 1);
-    await f.bridge.handle('!dm:test', event('!approve', '$replay'));
+    await f.bridge.handle('!dm:test', incoming('!approve', '$replay'));
     assert.equal(calls, 1);
   } finally { uploadFinish.release(); f.bridge.stop(); await task; }
+});
+
+for (const route of ['command', 'agent'] as const) for (const outcome of ['deny', 'revoke', 'privacy'] as const)
+test(`guest publication via ${route} never pushes after ${outcome}`, async t => {
+  const confirmation = gate(), decision = gate(), finish = gate();
+  let allowed = true, privateRoom = true, pushed = false;
+  const f = fixture(t, 'codex', async (_kind, _prompt, _key, signal, _sender, _files, _interact, publish) => {
+    assert.ok(publish);
+    return publish({ repository: '.', remote: 'origin', branch: 'main' }, signal);
+  }, true, {
+    timeoutMs: 5000,
+    isAuthorized: user => user === '@guest:test' && allowed,
+    isPrivateRoom: async () => privateRoom,
+    confirmation: async () => { confirmation.release(); },
+    publish: async (_input, signal, interact, authorize) => {
+      const answer = await interact({ text: 'Publish?', approve: { approved: true }, deny: { approved: false } }, signal);
+      decision.release();
+      if (!('approved' in answer) || answer.approved !== true) return 'Declined.';
+      await finish.promise;
+      await authorize();
+      pushed = true;
+      return 'Published.';
+    },
+  });
+  const incoming = (body: string, id: string) => ({ ...event(body, id), sender: '@guest:test' });
+  const task = f.bridge.handle('!dm:test', incoming(route === 'command' ? '!publish {}' : 'Publish the project', '$start'));
+  try {
+    await confirmation.promise;
+    await f.bridge.handle('!dm:test', incoming(outcome === 'deny' ? '!deny' : '!approve', '$answer'));
+    await decision.promise;
+    if (outcome === 'revoke') { allowed = false; f.bridge.revoke('@guest:test'); }
+    if (outcome === 'privacy') privateRoom = false;
+    finish.release();
+    await task;
+    assert.equal(pushed, false);
+    if (outcome === 'deny') assert.equal(f.replies.at(-1), 'Declined.');
+    else assert.equal(f.errors.length, 1);
+  } finally { finish.release(); f.bridge.stop(); await task; }
 });
 
 test('reviewed publication rejects unauthorized callers, malformed requests, and failed report delivery', async t => {
   let calls = 0, confirmed = false;
   const f = fixture(t, 'codex', async () => assert.fail('No model'), true, {
-    isAuthorized: () => true,
+    isAuthorized: user => user === '@owner:test',
     publish: async (_input, signal, interact) => {
       calls++; const answer = await interact({ text: 'Publish?', attachments: [{ root: '/review', path: '/review/report.html' }], approve: { yes: true }, deny: { yes: false } }, signal);
       confirmed = 'yes' in answer && answer.yes === true; return 'unexpected';

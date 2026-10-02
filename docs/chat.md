@@ -90,15 +90,15 @@ Reports are scoped to the bot, sender, room and Matrix thread, survive connector
 
 Codex and Claude Code can request publication themselves through the `prepare_publish` MCP tool. Ask the bot to publish committed changes; it supplies `repository`, `remote` and `branch`. Riftjack sends the HTML review to the current conversation, then asks for confirmation. The tool waits for your decision and returns the publication result to the agent. There is no keyword in the agent's reply that triggers a push.
 
-The tool is available only in the initial owner's conversations with writable coding bots. Its local connection is created for each task and closed when that task ends. The tool timeout follows `TASK_TIMEOUT_SECONDS` (24 hours by default). The connector checks access and room privacy again before pushing; it does not expose an approval API to agents. Global Codex and Claude MCP settings are not edited. Starting `prepare_publish` is allowed without a preliminary tool-consent prompt; publication still requires the separate Matrix confirmation after report delivery. This exception is limited to that one connector tool. Other configured MCP servers retain their existing policies.
+The tool is available to every authorized user of a writable Codex or Claude bot, including users granted access only to that bot. Only the user who requested the publication can confirm it, in the same conversation. Its local connection is created for each task and closed when that task ends. The tool timeout follows `TASK_TIMEOUT_SECONDS` (24 hours by default). The connector checks access and room privacy again before pushing; it does not expose an approval API to agents. Global Codex and Claude MCP settings are not edited. Starting `prepare_publish` is allowed without a preliminary tool-consent prompt; publication still requires the separate Matrix confirmation after report delivery. This exception is limited to that one connector tool. Other configured MCP servers retain their existing policies.
 
-The initial owner can ask an idle Codex or Claude Code bot to review and publish committed changes:
+Any authorized user can ask an idle Codex or Claude Code bot to review and publish committed changes:
 
 ```text
 !publish {"repository":".","remote":"origin","branch":"main"}
 ```
 
-The repository path is relative to that bot's workspace (an absolute path inside it also works). Supply a configured remote name and the destination branch explicitly. The connector performs this structured command locally; it does not ask a model to interpret it. Read-only bots and external Grok workers cannot publish through this command.
+The repository path is relative to that bot's workspace (an absolute path inside it also works). Supply a configured remote name and the destination branch explicitly. Access to a writable bot includes reviewed publication of repositories inside its workspace using the host’s Git credentials. There is no separate per-user repository or remote allowlist; users sharing a bot share this scope. The connector performs this structured command locally; it does not ask a model to interpret it. Read-only bots and external Grok workers cannot publish through this command.
 
 Riftjack resolves the push destination, reads its branch tip and prepares a self-contained HTML attachment. It contains the final diff and **every outgoing commit**, including changes later reverted. File sections collapse, added/deleted lines have colors and line numbers, and the file needs no JavaScript or external resources. Binary contents are marked as unavailable for text review. Uncommitted files, other local branches and unrelated tags are excluded. Git authentication must already work on the host; the connector does not collect credentials.
 

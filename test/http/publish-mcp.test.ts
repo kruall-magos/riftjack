@@ -98,7 +98,7 @@ function fixture(t: { after(fn: () => void): void }) {
 
 // Real backend adapters with tiny CLI doubles: exercise MCP discovery/call over HTTP,
 // Matrix attachment/confirmation delivery and a real push to an isolated bare repo.
-for (const kind of ['codex', 'claude'] as const) test(`${kind} invokes reviewed publication through MCP and a resumed turn gets a fresh endpoint`, { timeout: 15_000 }, async t => {
+for (const kind of ['codex', 'claude'] as const) for (const sender of ['@owner:test', '@guest:test']) test(`${kind} (${sender}) invokes reviewed publication through MCP and a resumed turn gets a fresh endpoint`, { timeout: 15_000 }, async t => {
   const f = fixture(t), executable = join(f.root, 'engine.cjs');
   writeFileSync(executable, `#!/usr/bin/env node
 const fs = require('node:fs');
@@ -169,7 +169,7 @@ if (args.includes('--print')) {
   });
   t.after(() => bridge.stop());
   let nextId = 0;
-  const event = (body: string): MatrixEvent => ({ event_id: '$' + ++nextId, sender: config.owner, type: 'm.room.message', origin_server_ts: Date.now(), content: { msgtype: 'm.text', body } });
+  const event = (body: string): MatrixEvent => ({ event_id: '$' + ++nextId, sender, type: 'm.room.message', origin_server_ts: Date.now(), content: { msgtype: 'm.text', body } });
   const task = bridge.handle('!room:test', event('Please publish the changes.'));
   await Promise.race([uploaded.promise, task.then(() => { throw new Error('Backend ended before delivering a review: ' + messages.at(-1)); })]);
   await bridge.handle('!room:test', event('!approve'));
@@ -178,6 +178,8 @@ if (args.includes('--print')) {
   assert.match(messages.at(-1)!, /confirmation|cancel/);
   assert.equal(f.remoteHead(), f.base);
   allowUpload.resolve(); await confirmed.promise;
+  await bridge.handle('!room:test', { ...event('!approve'), sender: sender === config.owner ? '@guest:test' : config.owner });
+  assert.equal(f.remoteHead(), f.base);
   await bridge.handle('!room:test', event('!approve')); await task;
   assert.equal(f.remoteHead(), f.head);
   assert.match(messages.at(-1)!, /Published/);

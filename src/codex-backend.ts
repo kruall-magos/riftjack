@@ -50,7 +50,7 @@ export function createCodexBackend(config: Config, state: State): Backend & { st
     signal.addEventListener('abort', abort, { once: true });
     let publication: Awaited<ReturnType<typeof startPublishMcp>> | undefined;
     try {
-      if (publish && interact && sender === config.owner && config.sandbox !== 'read-only') publication = await startPublishMcp(publish, signal);
+      if (publish && interact && config.sandbox !== 'read-only') publication = await startPublishMcp(publish, signal);
       const outbox = await outboxDirectory(config.workspace, key);
       signal.throwIfAborted();
       const server = current.server = new AppServer(config, notification => {

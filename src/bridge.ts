@@ -106,7 +106,6 @@ export class Bridge {
     let publication: unknown;
     if (verb === 'publish') {
       if (!o.publish) { await reply('Reviewed publication is not available for this bot.'); return; }
-      if (event.sender !== o.owner) { await reply('Only the initial owner can publish through this connector.'); return; }
       try { publication = JSON.parse(prompt.slice('!publish'.length).trim()); }
       catch { await reply('Use !publish {"repository":".","remote":"origin","branch":"main"}.'); return; }
     }
@@ -202,7 +201,7 @@ export class Bridge {
             if (o.confirmation) await o.confirmation(room, requestEvent, text, controls, markdown);
             else await o.reply(room, requestEvent, text);
           });
-        const publish: PublishAction | undefined = o.publish && event.sender === o.owner ? async (input, callSignal) => {
+        const publish: PublishAction | undefined = o.publish ? async (input, callSignal) => {
           if (current.publication) throw new PublicError('A publication review is already pending.');
           const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
           signal.throwIfAborted();
