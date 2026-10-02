@@ -100,7 +100,7 @@ for (const accepted of [true, false]) test(`active feedback is ${accepted ? 'ste
   try {
     await bridge.handle(room, reaction('👎'));
     assert.equal(updates.length, 1); assert.match(updates[0], /negative feedback/);
-    assert.deepEqual(replies, ['Working on it…']);
+    assert.deepEqual(replies, ['…']);
   } finally { release.resolve(); await task; }
   assert.equal(prompts.length, accepted ? 1 : 2);
 });

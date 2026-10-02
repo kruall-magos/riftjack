@@ -182,7 +182,7 @@ export class Bridge {
     }, o.timeoutMs);
     try {
       if (verb === 'publish') await reply('Preparing the complete publication review…');
-      else if (!feedback && (verb === 'codex' || verb === 'claude')) await reply('Working on it…');
+      else if (!feedback && (verb === 'codex' || verb === 'claude')) await reply('…');
       let next: Followup | undefined = { prompt, event, attachments: await this.receive(room, event, current) };
       while (next) {
         controller.signal.throwIfAborted();

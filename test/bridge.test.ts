@@ -352,7 +352,7 @@ test('attachment replies go through the media sender with the original event', a
     },
   });
   await f.bridge.handle('!dm:test', incoming);
-  assert.equal(sends, 1); assert.deepEqual(f.replies, ['Working on it…']);
+  assert.equal(sends, 1); assert.deepEqual(f.replies, ['…']);
 });
 
 for (const kind of ['codex', 'claude', 'manager'] as const) test(kind + ' handles owner !restart locally and ignores replay', async t => {
@@ -469,7 +469,7 @@ test('steering received before the initial backend starts waits for readiness', 
   const acknowledging = gate(), acknowledged = gate(), finish = gate();
   let running = false, steered = false;
   const f = fixture(t, 'codex', async () => { running = true; await finish.promise; return 'done'; }, true, {
-    reply: async (_room, _event, text) => { if (text === 'Working on it…') { acknowledging.release(); await acknowledged.promise; } },
+    reply: async (_room, _event, text) => { if (text === '…') { acknowledging.release(); await acknowledged.promise; } },
     steer: async () => { assert.equal(running, true); steered = true; return true; },
   });
   const task = f.bridge.handle('!dm:test', event());
