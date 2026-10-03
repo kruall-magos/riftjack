@@ -2,6 +2,7 @@ import { startBackgroundMcp, BACKGROUND_SERVER, BACKGROUND_TOOL, backgroundInstr
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { dirname } from 'node:path';
+import { userInfo } from 'node:os';
 import { engineReport } from './bot-status.js';
 import type { Backend, Steer } from './bridge.js';
 import type { Config } from './config.js';
@@ -15,8 +16,15 @@ const record = (value: unknown): value is Record<string, any> => !!value && type
 
 function claudeEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-  for (const name of ['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'TERM', 'SYSTEMROOT']) {
+  for (const name of ['PATH', 'HOME', 'USER', 'LOGNAME', 'TMPDIR', 'LANG', 'LC_ALL', 'TERM', 'SYSTEMROOT']) {
     if (process.env[name]) env[name] = process.env[name];
+  }
+  // Service launchers may omit login names. Claude needs the host identity
+  // when looking up its local credentials, including the macOS Keychain.
+  if (!env.USER || !env.LOGNAME) {
+    const username = userInfo().username;
+    env.USER ||= username;
+    env.LOGNAME ||= username;
   }
   // Local Claude login is used. API keys, cloud-provider credentials, connector secrets,
   // and nested-session flags are not inherited by this independent Claude process.

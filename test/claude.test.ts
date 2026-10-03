@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, realpathSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { createBackend, routeBackends } from '../src/backends.js';
 import { checkClaude, claudeApprovals, claudeArguments, claudeUsage } from '../src/claude-backend.js';
@@ -22,7 +22,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const args = process.argv.slice(2);
 const record = value => fs.appendFileSync(__filename + '.calls', JSON.stringify(value) + '\\n');
-record({ args, cwd: process.cwd(), secrets: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'AWS_ACCESS_KEY_ID', 'SYNAPSE_ADMIN_TOKEN', 'MATRIX_OWNER_ID', 'ANTHROPIC_BASE_URL', 'CLAUDECODE'].filter(key => process.env[key]) });
+record({ args, cwd: process.cwd(), user: process.env.USER, logname: process.env.LOGNAME, secrets: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'AWS_ACCESS_KEY_ID', 'SYNAPSE_ADMIN_TOKEN', 'MATRIX_OWNER_ID', 'ANTHROPIC_BASE_URL', 'CLAUDECODE'].filter(key => process.env[key]) });
 if (args.includes('--help')) {
   console.log(${JSON.stringify(options.legacy ? '--help' : '--input-format --output-format --permission-mode --permission-prompt-tool --append-system-prompt --tools --settings --resume')}); process.exit(0);
 }
@@ -168,6 +168,31 @@ test('Claude uses its own login/session and never inherits connector credentials
   assert.equal(saved.claude, 'claude-session-1');
   f.state.reset('conversation');
   assert.deepEqual(f.state.session('conversation'), {});
+});
+
+for (const names of [
+  { USER: 'host-user', LOGNAME: 'host-login' },
+  { USER: undefined, LOGNAME: undefined },
+  { USER: 'host-user', LOGNAME: '' },
+  { USER: '', LOGNAME: 'host-login' },
+]) test(`Claude supplies host login names for readiness, tasks and usage: ${JSON.stringify(names)}`, async t => {
+  const f = setup(t);
+  const previous = { USER: process.env.USER, LOGNAME: process.env.LOGNAME };
+  const assign = (values: typeof previous) => {
+    for (const key of ['USER', 'LOGNAME'] as const) {
+      if (values[key] === undefined) delete process.env[key]; else process.env[key] = values[key];
+    }
+  };
+  t.after(() => assign(previous)); assign(names);
+  await f.backend('claude', 'hello', 'identity-check', signal(), '@owner:test');
+  await claudeUsage(f.config, signal());
+  const calls = f.calls().filter(call => call.args);
+  assert.equal(calls.length, 4); // --help, auth status, task and /usage
+  for (const call of calls) {
+    assert.equal(call.user, names.USER || userInfo().username);
+    assert.equal(call.logname, names.LOGNAME || userInfo().username);
+    assert.deepEqual(call.secrets, []);
+  }
 });
 
 test('Claude readiness is checked once and re-checked after a failed task', async t => {
