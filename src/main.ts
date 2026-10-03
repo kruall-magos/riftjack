@@ -47,8 +47,8 @@ process.channel?.unref();
 const notifySupervisor = (message: SupervisorMessage) => { process.send?.(message, undefined, undefined, () => {}); };
 let tunnel: SshTunnel | undefined;
 
-function diagnostics(error: unknown) {
-  console.error(errorMessage(error));
+function diagnostics(error: unknown, bot?: string) {
+  console.error(JSON.stringify({ time: new Date().toISOString(), event: 'connector-error', bot, message: errorMessage(error) }));
 }
 
 function lock(dir: string) {
@@ -241,7 +241,7 @@ async function main() {
       owner: access.owner, isStopping: () => stopping || restart.pending, restart: (reply, target, scope) => restart.request(reply, target, scope),
       steer: backend.steer,
       queuedUpdateMessage: account.kind === 'claude' ? 'Your update is queued for Claude Code in this conversation. It will run after the current step.' : undefined,
-      since, timeoutMs: config.timeoutMs, state, report: diagnostics,
+      since, timeoutMs: config.timeoutMs, state, report: error => diagnostics(error, account.userId),
       linkedSession: linkedAgent ? (room, event) => links.key(account.userId, room, event) : undefined,
       decoratePrompt: linkedAgent ? (room, event, prompt, steering) => links.prompt(account.userId, room, event, prompt, steering) : undefined,
       promptDelivered: linkedAgent ? () => links.acknowledge(account.userId) : undefined,

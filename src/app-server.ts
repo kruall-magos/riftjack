@@ -11,6 +11,11 @@ export type ServerRequest = { id: string | number; method: string; params: Recor
 export type RequestHandler = (request: ServerRequest, signal: AbortSignal) => Promise<object | undefined>;
 export type CodexInput = { type: 'text'; text: string; text_elements: [] } | { type: 'localImage'; path: string };
 
+// Only connector-owned operation names may appear in diagnostics, never RPC parameters.
+const operations = new Set(['initialize', 'account/read', 'account/rateLimits/read', 'thread/start',
+  'thread/resume', 'thread/inject_items', 'turn/start', 'turn/steer', 'turn/interrupt', 'plugin/read', 'plugin/install']);
+const operationName = (method: string) => operations.has(method) ? method : 'request';
+
 export class RpcError extends PublicError {
   constructor(readonly code: number, message?: unknown) {
     // Map only a known server error; never forward arbitrary diagnostics to chat.
@@ -50,11 +55,11 @@ export class AppServer {
       this.pending.clear();
       onFailure(error);
     };
-    this.closed = new Promise(resolve => this.child.once('close', () => {
-      fail(new Error('Codex App Server exited.')); resolve();
+    this.closed = new Promise(resolve => this.child.once('close', (code, signal) => {
+      fail(new PublicError(`Codex App Server exited${signal ? ` (${signal})` : code !== null ? ` (code ${code})` : ''}.`)); resolve();
     }));
     this.child.once('error', () => fail(new PublicError('Could not start Codex CLI. Install it on the host and set CODEX_PATH to its executable if it is not on PATH.')));
-    this.child.stdin.on('error', () => fail(new Error('Codex App Server input pipe failed.')));
+    this.child.stdin.on('error', () => fail(new PublicError('Codex App Server input pipe failed.')));
     // Diagnostics from Codex may contain sensitive data. Do not forward them verbatim.
     this.child.stderr.resume();
     const lines = createInterface({ input: this.child.stdout });
@@ -74,7 +79,7 @@ export class AppServer {
             this.incoming.delete(message.id);
             result ??= deniedRequest(message.method);
             this.write(result !== undefined ? { id: message.id, result } : { id: message.id, error: { code: -32601, message: 'This interactive request is not supported by this connector.' } });
-          })().catch(() => fail(new Error('Could not answer Codex App Server request.')));
+          })().catch(() => fail(new PublicError('Could not answer Codex App Server request.')));
         } else if (message.method) {
           if (message.method === 'serverRequest/resolved') {
             const entry = this.incoming.get(message.params?.requestId);
@@ -91,7 +96,7 @@ export class AppServer {
           if (message.error) request.reject(new RpcError(message.error.code, message.error.message));
           else request.resolve(message.result);
         }
-      } catch { fail(new Error('Invalid Codex App Server response.')); }
+      } catch { fail(new PublicError('Could not process a Codex App Server response. Check the installed Codex version.')); }
     });
   }
 
@@ -106,11 +111,11 @@ export class AppServer {
   }
 
   request<T>(method: string, params: object, timeoutMs = 30_000): Promise<T> {
-    if (this.failure || this.closing) return Promise.reject(this.failure || new Error('Codex App Server is closing.'));
+    if (this.failure || this.closing) return Promise.reject(this.failure || new PublicError('Codex App Server is closing.'));
     const id = ++this.nextId;
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pending.delete(id); reject(new Error('Codex App Server request timed out.'));
+        this.pending.delete(id); reject(new PublicError(`Codex App Server timed out waiting for ${operationName(method)} after ${Math.ceil(timeoutMs / 1000)} seconds. No automatic retry was made; check the task state before retrying.`));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this.write({ id, method, params });
