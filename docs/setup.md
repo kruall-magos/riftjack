@@ -75,6 +75,6 @@ Bot creation failures are reported in the manager DM and connector log with the 
 
 ## Codex model settings
 
-Set `CODEX_MODEL`, `CODEX_REASONING_EFFORT` and `CODEX_SERVICE_TIER` in `.env` to pin the model, reasoning effort and service tier for all Codex bots. Blank values inherit Codex settings. Effort and tier availability depend on the selected model and installed Codex CLI. For example, `CODEX_REASONING_EFFORT=high` selects high reasoning effort; `CODEX_SERVICE_TIER=default` explicitly selects standard speed, while `priority` requests priority processing.
+Set `CODEX_MODEL`, `CODEX_REASONING_EFFORT` and `CODEX_SERVICE_TIER` in `.env` to pin the model, reasoning effort and service tier as defaults for Codex bots. Individual bots can override them through the manager (see [model settings](manager.md#model-settings)). Blank values inherit Codex settings. Effort and tier availability depend on the selected model and installed Codex CLI. For example, `CODEX_REASONING_EFFORT=high` selects high reasoning effort; `CODEX_SERVICE_TIER=default` explicitly selects standard speed, while `priority` requests priority processing.
 
 Restart Riftjack after editing these settings. Explicit values apply to both new and resumed conversations, without resetting their history. They do not edit your global Codex configuration. See the [Codex configuration reference](https://developers.openai.com/codex/config-reference).

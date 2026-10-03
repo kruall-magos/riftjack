@@ -418,3 +418,17 @@ test('Claude sends progress around tool use without duplicating final text or ex
   assert.deepEqual(updates, ['Checking the files.', 'Running the checks.']);
   assert.equal(typeof result === 'string' ? result : result.text, 'Claude answer');
 });
+
+test('Claude snapshots dynamic model settings and refreshes them on resume', async t => {
+  const f = setup(t), settings = { ...f.config, claudeModel: 'first-model' };
+  const backend = createBackend(() => settings, f.state);
+  const first = backend('claude', 'hello', 'dynamic', signal(), '@owner:test');
+  settings.claudeModel = 'second-model';
+  await first;
+  const invocation = () => f.calls().filter(c => c.args?.includes('--model')).at(-1).args as string[];
+  assert.equal(invocation()[invocation().indexOf('--model') + 1], 'first-model');
+  await backend('claude', 'hello again', 'dynamic', signal(), '@owner:test');
+  const args = invocation();
+  assert.equal(args[args.indexOf('--model') + 1], 'second-model');
+  assert.equal(args[args.indexOf('--resume') + 1], 'claude-session-1');
+});

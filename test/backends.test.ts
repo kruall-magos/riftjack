@@ -676,3 +676,18 @@ test('Codex forwards completed commentary separately from the final response', a
   assert.deepEqual(updates, ['Checking the project.']);
   assert.doesNotMatch(typeof result === 'string' ? result : result.text, /Checking the project/);
 });
+
+test('Codex snapshots dynamic settings per task and refreshes them on resume', async t => {
+  const f = setup(t), settings = { ...f.config, codexModel: 'first-model', codexReasoningEffort: 'high', codexServiceTier: 'priority' };
+  const backend = createBackend(() => settings, f.state);
+  const first = backend('codex', 'hello', 'dynamic', signal(), '@owner:test');
+  settings.codexModel = 'second-model'; settings.codexReasoningEffort = 'medium'; settings.codexServiceTier = 'default';
+  await first;
+  assert.equal(f.calls().filter(c => c.method === 'turn/start').at(-1).params.model, 'first-model');
+  await backend('codex', 'hello again', 'dynamic', signal(), '@owner:test');
+  const thread = f.calls().filter(c => c.method === 'thread/resume').at(-1).params;
+  assert.equal(thread.model, 'second-model');
+  const turn = f.calls().filter(c => c.method === 'turn/start').at(-1).params;
+  assert.equal(turn.model, 'second-model'); assert.equal(turn.effort, 'medium'); assert.equal(turn.serviceTier, 'default');
+  assert.equal(f.state.session('dynamic').codex, 'thread_1');
+});

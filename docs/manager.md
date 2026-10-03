@@ -86,3 +86,25 @@ With `WORKER_PORT` enabled, `create a Grok bot called Research` creates an encry
 Matrix bot backed by a durable worker inbox. Connect its external agent using
 [Grok setup](grok.md). Configure its workspace and tool permissions on the worker;
 the manager does not assign it a directory on the connector host.
+
+## Model settings
+
+The connector owner or a bot’s creator can give each Codex or Claude bot its own model. Send these commands to the manager; select the bot by name, short ID or full Matrix ID. Quote names containing ` to `.
+
+```text
+set model bot Builder to MODEL
+set reasoning bot Builder to high
+set tier bot Builder to default
+show settings bot Builder
+reset model bot Builder
+reset reasoning bot Builder
+reset tier bot Builder
+```
+
+Replace `MODEL` with an identifier accepted by that bot’s CLI and account. Model selection works for both Codex and Claude. Reasoning and tier overrides are Codex-only; `default` requests standard service and `priority` requests priority processing. Grok’s model belongs to its external worker.
+
+Each field inherits its corresponding `.env` default until explicitly set for the bot. Resetting a field removes just that override. If the shared value is blank, Riftjack leaves that option to the CLI. `show settings bot` labels overrides and inherited values; `!status` in the bot chat shows the effective configuration separately from the last CLI session report.
+
+Changes are saved in the bot’s `engineSettings` record in `accounts.json` and apply to the next task, including resumed conversations and background notifications. Running tasks and their steering retain the settings captured when they started. No connector restart or conversation reset is needed for manager commands. Editing `.env` or `accounts.json` directly requires a restart. These settings apply to every conversation with that bot; they do not create separate provider credentials or quota.
+
+Riftjack validates setting names and identifier syntax. Availability of a particular model, reasoning level or service tier is checked by the CLI when a task starts; saving settings does not make a model request.

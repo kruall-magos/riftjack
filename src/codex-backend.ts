@@ -25,7 +25,7 @@ function input(prompt: string, attachments: IncomingAttachment[]): CodexInput[] 
     ...attachments.filter(a => a.image).map(a => ({ type: 'localImage' as const, path: a.path }))];
 }
 
-export function createCodexBackend(config: Config, state: State): Backend & { steer: Steer } {
+export function createCodexBackend(configuration: Config | (() => Config), state: State): Backend & { steer: Steer } {
   type Active = {
     key: string; sender: string; signal: AbortSignal; server?: AppServer; threadId?: string; turnId?: string;
     ended: boolean; ready: ReturnType<typeof deferred<void>>; done: ReturnType<typeof deferred<Turn>>;
@@ -35,6 +35,7 @@ export function createCodexBackend(config: Config, state: State): Backend & { st
   // One task per conversation key in this backend’s configured workspace.
   const tasks = new Map<string, Active>();
   const run: Backend = async (mode, prompt, key, signal, sender, attachments = [], interact, publish, hooks) => {
+    const config = { ...(typeof configuration === 'function' ? configuration() : configuration) };
     signal.throwIfAborted();
     if (mode !== 'codex') throw new Error('Manager requests must use the manager handler.');
     if (tasks.has(key)) throw new PublicError('A task is already running in this conversation.');

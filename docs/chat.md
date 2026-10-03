@@ -130,7 +130,7 @@ Coding bots render Markdown replies as sanitized Matrix HTML (`format: org.matri
 
 ## Bot status
 
-Send `!status` to a Codex or Claude Code bot to see its task state and configured workspace/model. Codex also shows configured reasoning effort and service tier. The command works during a task, does not steer or queue a prompt, and does not start a CLI process or make a model request. It is available to accounts authorized to use the bot in a private conversation.
+Send `!status` to a Codex or Claude Code bot to see its task state and configured workspace/model, including per-bot overrides. Change those through the manager’s [model settings commands](manager.md#model-settings). Codex also shows configured reasoning effort and service tier. The command works during a task, does not steer or queue a prompt, and does not start a CLI process or make a model request. It is available to accounts authorized to use the bot in a private conversation.
 
 The separate **Last CLI session report** section shows metadata reported when Codex starts/resumes a thread or Claude Code emits its session initialization event, with the report timestamp. Codex reports its model, reasoning effort, service tier and workspace. Claude reports its model, workspace, permission mode and Fast mode when available. Claude's ordinary stream output may omit effort; missing fields are shown as unknown. These are session reports, not per-request inference receipts or live queries. Changed settings, model fallback or changes made outside Riftjack may differ from the last report.
 

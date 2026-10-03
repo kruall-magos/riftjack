@@ -1,3 +1,4 @@
+import { type EngineSettings, validateEngineSettings } from './engine-settings.js';
 import { createHmac, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -6,7 +7,7 @@ import type { Mode } from './bridge.js';
 import { PublicError, safeErrorSummary, connectionHint } from './errors.js';
 export { PublicError } from './errors.js';
 
-export type Account = { userId: string; accessToken: string; kind: Mode; name: string; roomId?: string; inviteUserId?: string; workspace?: string };
+export type Account = { userId: string; accessToken: string; kind: Mode; name: string; roomId?: string; inviteUserId?: string; workspace?: string; engineSettings?: EngineSettings };
 
 export class Accounts {
   private accounts: Account[];
@@ -17,10 +18,20 @@ export class Accounts {
       !/^@[^\s:]+:[^\s]+$/.test(a.userId) || typeof a.accessToken !== 'string' || !a.accessToken ||
       typeof a.name !== 'string' || !['codex', 'claude', 'grok', 'manager'].includes(a.kind) ||
       (a.workspace !== undefined && (typeof a.workspace !== 'string' || !a.workspace || /[\0\r\n]/.test(a.workspace))))) throw new Error('Invalid accounts.json: expected valid bot accounts and optional workspace paths.');
+    for (const account of this.accounts) if (account.engineSettings !== undefined) validateEngineSettings(account.engineSettings, account.kind);
     if (new Set(this.accounts.map(a => a.userId)).size !== this.accounts.length) throw new Error('Duplicate bot accounts in accounts.json');
   }
-  list(): Account[] { return this.accounts.map(a => ({ ...a })); }
+  list(): Account[] { return this.accounts.map(a => ({ ...a, ...(a.engineSettings ? { engineSettings: { ...a.engineSettings } } : {}) })); }
   add(account: Account) { this.accounts.push(account); this.save(); }
+  setEngineSettings(userId: string, settings: EngineSettings) {
+    const account = this.accounts.find(a => a.userId === userId);
+    if (!account) throw new PublicError('Bot account not found.');
+    validateEngineSettings(settings, account.kind);
+    const updated = this.accounts.map(a => a === account ? { ...a, engineSettings: { ...settings } } : a);
+    writeFileSync(`${this.file}.tmp`, JSON.stringify(updated, null, 2), { mode: 0o600 });
+    renameSync(`${this.file}.tmp`, this.file);
+    this.accounts = updated;
+  }
   setName(userId: string, name: string) {
     const account = this.accounts.find(a => a.userId === userId);
     if (!account) throw new PublicError('Bot account not found.');

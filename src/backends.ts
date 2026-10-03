@@ -28,6 +28,6 @@ export function routeBackends(engines: { codex: Engine; claude: Engine }): Engin
   return Object.assign(run, { steer });
 }
 
-export function createBackend(config: Config, state: State): Engine {
+export function createBackend(config: Config | (() => Config), state: State): Engine {
   return routeBackends({ codex: createCodexBackend(config, state), claude: createClaudeBackend(config, state) });
 }

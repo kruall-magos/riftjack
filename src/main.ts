@@ -1,3 +1,5 @@
+import { withEngineSettings } from './engine-settings.js';
+import { parseBotSettingsRequest, manageBotSettings } from './bot-settings.js';
 import { BackgroundTasks } from './background-tasks.js';
 import { mkdirSync, openSync, closeSync, readFileSync, unlinkSync, writeFileSync, existsSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
@@ -152,7 +154,8 @@ async function main() {
     if (clients.has(account.userId)) return;
     if (stopping) throw new PublicError('Connector is shutting down. Restart it to bring the new bot online.');
     const botConfig = configForWorkspace(config, account.workspace);
-    const backend = createBackend(botConfig, state);
+    const currentConfig = () => withEngineSettings(botConfig, accounts.list().find(a => a.userId === account.userId) ?? account);
+    const backend = createBackend(currentConfig, state);
     const dir = join(config.dataDir, 'bots', createHash('sha256').update(account.userId).digest('hex'));
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const background = account.kind === 'codex' || account.kind === 'claude' ? new BackgroundTasks(join(dir, 'background-tasks.json'), botConfig.workspace) : undefined;
@@ -242,7 +245,7 @@ async function main() {
           thread: relation?.rel_type === 'm.thread' ? relation.event_id : undefined }, signal);
       } : undefined,
       status: account.kind === 'codex' || account.kind === 'claude'
-        ? key => botStatus(account.kind as 'codex' | 'claude', botConfig, state.session(key)) + (background?.summary(key, state.session(key)[account.kind as 'codex' | 'claude']) || '') : undefined,
+        ? key => botStatus(account.kind as 'codex' | 'claude', currentConfig(), state.session(key)) + (background?.summary(key, state.session(key)[account.kind as 'codex' | 'claude']) || '') : undefined,
       usage: account.kind === 'claude' ? async signal => formatClaudeUsage(await claudeUsage(botConfig, signal))
         : account.kind === 'codex' ? signal => codexUsage(botConfig, signal) : undefined,
       acceptManagerAvatar: (prompt, sender) => {
@@ -267,6 +270,8 @@ async function main() {
             return botInvitations.ensure(botId, userId, target.client, () => !stopping && access.has(userId, botId), signal);
           },
         });
+        const settingsRequest = parseBotSettingsRequest(prompt);
+        if (settingsRequest) return manageBotSettings(settingsRequest, { accounts, owner: access.owner, sender, config });
         const userCreation = parseUserCreation(prompt);
         if (userCreation) {
           if (creating) return 'Another account is being created. Retry when it finishes.';

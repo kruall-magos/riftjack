@@ -158,7 +158,7 @@ async function claudeInput(prompt: string, attachments: IncomingAttachment[], co
   return JSON.stringify({ type: 'user', message: { role: 'user', content } }) + '\n';
 }
 
-export function createClaudeBackend(config: Config, state: State): Backend & { steer: Steer } {
+export function createClaudeBackend(configuration: Config | (() => Config), state: State): Backend & { steer: Steer } {
   // Each check spawns two Claude processes. Re-check only at first use and after a failed task,
   // so a logout or downgrade still gets an actionable message on the next attempt.
   let checked = false;
@@ -166,6 +166,7 @@ export function createClaudeBackend(config: Config, state: State): Backend & { s
     try { return await turn(...args); } catch (error) { checked = false; throw error; }
   };
   const turn: Backend = async (mode, prompt, key, signal, sender, attachments = [], interact, publish, hooks) => {
+    const config = { ...(typeof configuration === 'function' ? configuration() : configuration) };
     if (mode !== 'claude') throw new Error('Claude backend received the wrong bot kind.');
     signal.throwIfAborted();
     if (!checked) { await checkClaude(config, signal); checked = true; }
