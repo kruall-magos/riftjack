@@ -90,6 +90,15 @@ process.on('SIGTERM', () => { record({ stopped: true }); process.exit(0); });
   return { dir, config, state, backend, calls };
 }
 const signal = () => new AbortController().signal;
+
+test('Claude refuses an unexpected resumed session without overwriting the saved history', async t => {
+  const f = setup(t);
+  f.state.update('pinned', { claude: 'expected-session' });
+  await assert.rejects(f.backend('claude', 'hello', 'pinned', signal(), '@owner:test'), /different session/);
+  assert.equal(f.state.session('pinned').claude, 'expected-session');
+  const args = f.calls().find(call => call.args?.includes('--resume')).args;
+  assert.equal(args[args.indexOf('--resume') + 1], 'expected-session');
+});
 test('Claude tasks work when the Codex executable is unavailable', async t => {
   const f = setup(t);
   const backend = createBackend({ ...f.config, codexPath: join(f.dir, 'codex-not-installed') }, f.state);

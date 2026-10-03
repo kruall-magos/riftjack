@@ -20,6 +20,7 @@ import { replyContent } from './message-format.js';
 import { inlineCode, markdownText, managerBotList } from './manager-format.js';
 import { createMatrixUser, parseUserCreation } from './matrix-users.js';
 import { isPrivateRoom } from './private-room.js';
+import { ConversationLinks } from './conversation-links.js';
 import { sendConfirmation } from './confirmation-message.js';
 import { createBackend } from './backends.js';
 import { Accounts, parseManagerRequest, provision, PublicError, type Account } from './accounts.js';
@@ -116,6 +117,8 @@ async function main() {
     },
   });
   const state = new State(join(config.dataDir, 'sessions.json'));
+  const links = new ConversationLinks(join(config.dataDir, 'conversation-links.json'),
+    join(config.dataDir, 'shared-room-history.json'), accounts.list(), state, access.owner);
   const clients = new Map<string, { client: MatrixClient; bridge: Bridge | WorkerBridge; privateRoom: (room: string, sender: string) => Promise<boolean> }>();
   const workerServer = new WorkerServer();
   const workers = new Map<string, WorkerService>();
@@ -171,7 +174,11 @@ async function main() {
     const me = await client.getWhoAmI();
     if (me.user_id !== account.userId || !me.device_id) throw new PublicError('Bot ' + account.userId + ' needs its own device-bound Matrix access token.');
     const authorized = (sender: string) => access.has(sender, account.kind === 'manager' ? undefined : account.userId);
-    const privateRoom = (room: string, sender: string) => isPrivateRoom(client, room, account.userId, sender, authorized);
+    const linkedAgent = links.agent(account.userId);
+    const since = Date.now();
+    const privateRoom = async (room: string, sender: string) => linkedAgent
+      ? authorized(sender) && await links.allowed(account.userId, room, sender, () => client.getRoomState(room)) && authorized(sender)
+      : isPrivateRoom(client, room, account.userId, sender, authorized);
     const reactionTarget = async (room: string, eventId: string): Promise<MatrixEvent | undefined> => {
       try {
         // getEvent returns a RoomEvent wrapper for plaintext targets and a
@@ -234,7 +241,10 @@ async function main() {
       owner: access.owner, isStopping: () => stopping || restart.pending, restart: (reply, target, scope) => restart.request(reply, target, scope),
       steer: backend.steer,
       queuedUpdateMessage: account.kind === 'claude' ? 'Your update is queued for Claude Code in this conversation. It will run after the current step.' : undefined,
-      since: Date.now(), timeoutMs: config.timeoutMs, state, report: diagnostics,
+      since, timeoutMs: config.timeoutMs, state, report: diagnostics,
+      linkedSession: linkedAgent ? (room, event) => links.key(account.userId, room, event) : undefined,
+      decoratePrompt: linkedAgent ? (room, event, prompt, steering) => links.prompt(account.userId, room, event, prompt, steering) : undefined,
+      promptDelivered: linkedAgent ? () => links.acknowledge(account.userId) : undefined,
       publish: (account.kind === 'codex' || account.kind === 'claude') && botConfig.sandbox !== 'read-only'
         ? (input, signal, interact, authorize) => requestPublish(input, botConfig.workspace, botConfig.dataDir, botConfig.maxMediaBytes, signal, interact, authorize) : undefined,
       background: background ? async (input, { room, event, key }, signal) => {
@@ -346,9 +356,24 @@ async function main() {
         }
       },
     });
-    if (account.kind !== 'grok') client.on('room.message', (room: string, event: MatrixEvent) => { void bridge.handle(room, event).catch(diagnostics); });
+    let incoming = Promise.resolve();
+    const prepareIncoming = async (room: string, event: MatrixEvent) => {
+      const shared = links.room(account.userId, room);
+      if (shared) {
+        if (!Number.isFinite(event.origin_server_ts) || event.origin_server_ts! < since || !(await privateRoom(room, shared.owner))) return;
+        links.observe(account.userId, room, event);
+        // Other agents are heard as context, never impersonated as the controller.
+        // Their output does not start another turn or an unbounded bot dialogue.
+        if (event.sender !== shared.owner || !links.addressed(account.userId, room, event)) return;
+      }
+      // Serialize admission/observations, not model work: confirmations and
+      // same-room steering must still get through while the agent is running.
+      void bridge.handle(room, event).catch(diagnostics);
+    };
+    const inbox = (room: string, event: MatrixEvent) => { incoming = incoming.then(() => prepareIncoming(room, event)).catch(diagnostics); };
+    if (account.kind !== 'grok') client.on('room.message', inbox);
     client.on('room.event', (room: string, event: MatrixEvent) => {
-      if (account.kind !== 'grok' && event.type === 'm.reaction') void bridge.handle(room, event).catch(diagnostics);
+      if (account.kind !== 'grok' && event.type === 'm.reaction') inbox(room, event);
     });
     client.on('room.invite', (room: string, event: MatrixEvent) => {
       if (event.sender && authorized(event.sender)) void client.joinRoom(room).catch(diagnostics);
@@ -360,6 +385,7 @@ async function main() {
       const codingBridge = bridge;
       backgroundPumps.set(account.userId, async () => {
         if (!online || starting || stopping || restart.pending || !clients.has(account.userId)) return;
+        await codingBridge.drainQueued();
         await background.pump({
           valid: target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude'] === target.session,
           deliver: (target, event, admitted) => codingBridge.resumeBackground(target.room, event, target.session, admitted),

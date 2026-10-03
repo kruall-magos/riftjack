@@ -118,6 +118,14 @@ process.stdin.on('end', () => process.exit(0));
 }
 const signal = () => new AbortController().signal;
 
+test('Codex refuses an unexpected resumed session before starting a turn', async t => {
+  const f = setup(t);
+  f.state.update('pinned', { codex: 'expected-thread' });
+  await assert.rejects(f.backend('codex', 'hello', 'pinned', signal(), '@owner:test'), /different session/);
+  assert.equal(f.state.session('pinned').codex, 'expected-thread');
+  assert.equal(f.calls().some(call => call.method === 'turn/start'), false);
+});
+
 test('Codex model settings trim explicit values and leave blanks inherited', t => {
   const f = setup(t);
   const base = { MATRIX_HOMESERVER: 'https://matrix.test', MATRIX_OWNER_ID: '@owner:test', RIFTJACK_WORKSPACE: f.dir };

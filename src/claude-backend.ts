@@ -185,6 +185,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       pendingProgress = '';
     };
     let sessionId: string | undefined;
+    const savedSession = state.session(key).claude;
     const interactive = !!interact && claudeApprovals(config);
     // Open confirmations by Claude request ID; aborted when Claude withdraws them or the turn ends.
     const pending = new Map<string, AbortController>();
@@ -196,11 +197,12 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
     try {
       if (hooks?.background) background = await startBackgroundMcp(hooks.background, signal);
       if (publish && interact && config.sandbox !== 'read-only') publication = await startPublishMcp(publish, signal);
-      await runClaude(config, claudeArguments(config, state.session(key).claude, interactive,
+      await runClaude(config, claudeArguments(config, savedSession, interactive,
         mediaInstructions(outbox, config.maxMediaBytes) + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : ''), publication, background), signal, (line, stdin) => {
       let message: any;
       try { message = JSON.parse(line); } catch { throw new PublicError('Claude Code returned invalid stream-json output. Check its installed version.'); }
       if (typeof message.session_id === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(message.session_id)) {
+        if (savedSession && message.session_id !== savedSession) throw new PublicError('Claude resumed a different session. The saved history was not replaced.');
         if (sessionId !== message.session_id) {
           sessionId = message.session_id;
           state.update(key, { claude: sessionId });

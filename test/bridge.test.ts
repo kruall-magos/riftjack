@@ -236,7 +236,7 @@ test('duplicate deliveries only run once and survive restart', async t => {
   const f = fixture(t);
   await Promise.all([f.bridge.handle('!dm:test', event()), f.bridge.handle('!dm:test', event())]);
   assert.equal(f.calls.length, 1);
-  assert.equal(new State(f.file).claim('$1'), false);
+  assert.equal(new State(f.file).claim(JSON.stringify(['@bot:test', '$1'])), false);
 });
 
 test('separate DMs and threads have separate conversations; reset persists', async t => {

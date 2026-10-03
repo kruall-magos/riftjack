@@ -119,6 +119,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
         },
       };
       const thread = await server.request<{ thread: { id: string }; model?: string; reasoningEffort?: string | null; serviceTier?: string | null; cwd?: string }>(saved ? 'thread/resume' : 'thread/start', saved ? { ...options, threadId: saved, excludeTurns: true } : options);
+      if (saved && thread.thread.id !== saved) throw new PublicError('Codex resumed a different session. The saved history was not replaced.');
       current.threadId = thread.thread.id;
       state.update(key, { codex: current.threadId, codexReport: engineReport(thread) });
       signal.throwIfAborted();

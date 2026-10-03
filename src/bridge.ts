@@ -13,7 +13,7 @@ import { feedbackMeaning, reactionFeedback, type ReactionReader } from './reacti
 
 export type MatrixEvent = {
   type?: string; event_id?: string; sender?: string; origin_server_ts?: number; room_id?: string;
-  content?: MediaContent & { 'm.relates_to'?: { rel_type?: string; event_id?: string; key?: string; 'm.in_reply_to'?: { event_id: string } } };
+  content?: MediaContent & { 'm.mentions'?: { user_ids?: string[] }; 'm.relates_to'?: { rel_type?: string; event_id?: string; key?: string; 'm.in_reply_to'?: { event_id: string } } };
 };
 export type Mode = 'codex' | 'claude' | 'grok' | 'manager';
 export type BackendHooks = { background?: BackgroundAction; progress?: (text: string) => Promise<void> };
@@ -40,6 +40,9 @@ type Options = {
   // Account usage and limits of the engine.
   usage?: (signal: AbortSignal) => Promise<string>;
   report: (error: unknown) => void;
+  linkedSession?: (room: string, event: MatrixEvent) => string;
+  decoratePrompt?: (room: string, event: MatrixEvent, prompt: string, steering?: boolean) => string;
+  promptDelivered?: () => void;
 };
 function help(kind: Mode): string {
   return kind === 'manager' ? MANAGER_HELP : botHelp(kind);
@@ -48,7 +51,7 @@ function help(kind: Mode): string {
 type Followup = { prompt: string; event: MatrixEvent; attachments: IncomingAttachment[] };
 type Active = {
   room: string; event: MatrixEvent;
-  key: string; sender: string; controller: AbortController; running: boolean; failed: boolean;
+  key: string; backendKey: string; sender: string; controller: AbortController; running: boolean; failed: boolean;
   ready: Promise<void>; markReady: () => void; steering: Promise<void>; buffered: number; followups: Followup[];
   interactions: Interactions; publication?: boolean;
 };
@@ -61,8 +64,10 @@ export function sessionKey(room: string, event: MatrixEvent) {
 export class Bridge {
   private active?: Active;
   private stopped = false;
+  private draining = false;
+  private admission = Promise.resolve();
   constructor(private options: Options) {}
-  get busy(): boolean { return !!this.active; }
+  get busy(): boolean { return !!this.active || this.draining || (!!this.options.linkedSession && this.options.state.queued(this.options.botId) > 0); }
   stop() { this.stopped = true; this.active?.controller.abort(); }
   revoke(sender: string) { if (this.active?.sender === sender) this.active.controller.abort(); }
   async handle(room: string, event: MatrixEvent): Promise<void> {
@@ -73,18 +78,45 @@ export class Bridge {
   }
 
   async resumeBackground(room: string, event: MatrixEvent, session: string, admitted: () => void): Promise<boolean> {
-    if (this.active || this.stopped || this.options.isStopping?.()) return false;
+    if (this.busy || this.stopped || this.options.isStopping?.()) return false;
     let accepted = false;
     await this.handleMessage(room, event, true, { session, admitted: () => { admitted(); accepted = true; } });
     return accepted;
   }
 
-  private async handleMessage(room: string, event: MatrixEvent, feedback = false, background?: { session: string; admitted: () => void }): Promise<void> {
+  async drainQueued(): Promise<void> {
+    if (!this.options.linkedSession || this.draining || this.active || this.stopped || this.options.isStopping?.()) return;
+    this.draining = true;
+    try {
+      while (!this.active && !this.stopped && !this.options.isStopping?.()) {
+        const batch = this.options.state.dequeueBatch(this.options.botId);
+        const next = batch[0];
+        if (!next) break;
+        try { await this.handleMessage(next.room, next.event, next.feedback, undefined, true, batch.map(m => m.event)); }
+        catch (error) { this.options.report(error); }
+      }
+    } finally { this.draining = false; }
+  }
+
+  private async handleMessage(room: string, event: MatrixEvent, feedback = false, background?: { session: string; admitted: () => void }, fromQueue = false, batch: MatrixEvent[] = []): Promise<void> {
+    // A watch is lower priority than a human message arriving during its
+    // privacy check. It must not reserve the human admission queue.
+    if (background) return this.acceptMessage(room, event, feedback, background, fromQueue, batch, () => {});
+    const previous = this.admission;
+    let admitted!: () => void;
+    this.admission = new Promise<void>(resolve => { admitted = resolve; });
+    await previous;
+    try { await this.acceptMessage(room, event, feedback, background, fromQueue, batch, admitted); }
+    finally { admitted(); }
+  }
+
+  private async acceptMessage(room: string, event: MatrixEvent, feedback: boolean, background: { session: string; admitted: () => void } | undefined,
+    fromQueue: boolean, batch: MatrixEvent[], admitted: () => void): Promise<void> {
     const o = this.options;
     if (!event.sender || !o.isAuthorized(event.sender) || event.sender === o.botId) return;
     const media = isMedia(event.content?.msgtype);
     if (event.type !== 'm.room.message' || (event.content?.msgtype !== 'm.text' && !media) || !event.event_id) return;
-    if (!Number.isFinite(event.origin_server_ts) || event.origin_server_ts! < o.since) return;
+    if (!Number.isFinite(event.origin_server_ts) || (!fromQueue && event.origin_server_ts! < o.since)) return;
     if (event.content?.['m.relates_to']?.rel_type === 'm.replace') return;
     const body = !media && event.content?.['m.relates_to']?.['m.in_reply_to']
       ? event.content.body?.replace(/^>[^\n]*(?:\r?\n>[^\n]*)*\r?\n\r?\n/, '') : event.content?.body;
@@ -92,13 +124,17 @@ export class Bridge {
     if (!prompt || !(await o.isPrivateRoom(room, event.sender)) || !o.isAuthorized(event.sender)) return;
     if (background) {
       if (this.active || this.stopped || o.isStopping?.() || (o.kind !== 'codex' && o.kind !== 'claude') ||
-        o.state.session(sessionKey(room, event))[o.kind] !== background.session) return;
-    } else if (!o.state.claim(event.event_id)) return;
+        o.state.session(o.linkedSession?.(room, event) ?? sessionKey(room, event))[o.kind] !== background.session) return;
+    } else if (!fromQueue && !o.state.claim(JSON.stringify([o.botId, event.event_id]))) return;
     // Attachments never execute conversation controls. Manager avatar captions are allowed explicitly below.
     const publishCommand = !media && /^!publish(?:\s|$)/.test(prompt);
     const restartSupervisor = !media && /^!restart\s+supervisor$/.test(prompt);
     const verb = publishCommand ? 'publish' : restartSupervisor ? 'restart' : (!media && /^!(help|reset|cancel|restart|usage|status)$/.exec(prompt)?.[1]) || o.kind;
     const key = sessionKey(room, event);
+    const backendKey = o.linkedSession?.(room, event) ?? key;
+    // Room-state requests may finish out of order. Preserve incoming admission
+    // order, then release before any model work so controls/steering can proceed.
+    admitted();
     const reply = (text: string) => o.reply(room, event, text);
     if (this.stopped || o.isStopping?.()) { await reply('The connector is restarting or stopping. Please retry in a few seconds.'); return; }
     if (!media && /^!(approve|deny|answer)(?:\s|$)/.test(prompt)) {
@@ -154,7 +190,8 @@ export class Bridge {
       const task = !current ? 'Idle' : current.key !== key ? 'Busy in another conversation'
         : current.controller.signal.aborted ? 'Cancelling' : current.running ? 'Running' : 'Preparing or delivering';
       const queued = current?.key === key ? `\nQueued follow-ups: ${current.followups.length}. Pending updates: ${current.buffered}.` : '';
-      await o.reply(room, event, o.status(key) + `\n\n**Task:** ${task}${queued}`, true);
+      await o.reply(room, event, o.status(backendKey) + `\n\n**Task:** ${task}${queued}`
+        + (o.linkedSession ? `\nMessages queued across linked rooms: ${o.state.queued(o.botId)}.` : ''), true);
       return;
     }
     // Reads the account's limits without a model request, so it is allowed while a task runs.
@@ -166,17 +203,28 @@ export class Bridge {
       return;
     }
     if (verb === 'cancel') {
+      const relation = event.content?.['m.relates_to'];
+      const removed = o.linkedSession ? o.state.cancelQueued(o.botId, room, event.sender,
+        relation?.rel_type === 'm.thread' ? relation.event_id ?? null : null) : 0;
       if (this.active?.key === key) {
         this.active.controller.abort();
         await reply('Cancellation requested. Changes already made are retained.');
-      } else await reply('No active task in your conversation.');
+      } else await reply(removed ? `Cancelled ${removed} queued message(s) in this conversation.` : 'No active task in your conversation.');
       return;
     }
     if (!prompt || prompt.length > 16_000) { await o.reply(room, event, 'Supply a prompt of 1–16,000 characters.\n' + help(o.kind), true); return; }
-    if (this.active) {
-      if ((verb === 'codex' || verb === 'claude') && this.active.key === key && !this.active.publication && o.steer) {
+    if (verb === 'reset' && o.linkedSession) {
+      await reply('This agent continues a pinned session across linked rooms. Reset is disabled; explicitly reconfigure its session link to replace that history.'); return;
+    }
+    if (this.active || (this.draining && !fromQueue) || (!fromQueue && o.linkedSession && o.state.queued(o.botId) > 0)) {
+      if (o.linkedSession && (verb === 'codex' || verb === 'claude') &&
+          (!this.active || (this.active.key !== key && this.active.backendKey === backendKey))) {
+        const accepted = o.state.enqueue(o.botId, { room, event, feedback });
+        await reply(accepted ? 'Queued for this agent after its current conversation.' : 'The linked-room queue is full. Please resend after the agent finishes.');
+        void this.drainQueued().catch(o.report);
+      } else if ((verb === 'codex' || verb === 'claude') && this.active?.key === key && !this.active.publication && o.steer) {
         await this.steer(this.active, room, event, prompt, feedback);
-      } else await reply(this.active.publication ? 'A publication review is pending. Use its confirmation controls or !cancel; ordinary messages cannot change the publication.'
+      } else await reply(this.active?.publication ? 'A publication review is pending. Use its confirmation controls or !cancel; ordinary messages cannot change the publication.'
         : 'A task is running in this bot. Only messages in its active conversation can steer it; wait before resetting or starting another conversation.');
       return;
     }
@@ -184,7 +232,7 @@ export class Bridge {
     const controller = new AbortController();
     let markReady!: () => void;
     const ready = new Promise<void>(resolve => { markReady = resolve; });
-    const current: Active = { room, event, key, sender: event.sender, controller, running: false, failed: false,
+    const current: Active = { room, event, key, backendKey, sender: event.sender, controller, running: false, failed: false,
       ready, markReady, publication: verb === 'publish', steering: Promise.resolve(), buffered: 0, followups: [], interactions: new Interactions() };
     this.active = current;
     let timedOut = false;
@@ -197,7 +245,11 @@ export class Bridge {
       background?.admitted();
       if (verb === 'publish') await reply('Preparing the complete publication review…');
       else if (!feedback && (verb === 'codex' || verb === 'claude')) await reply('…');
-      let next: Followup | undefined = { prompt, event, attachments: await this.receive(room, event, current) };
+      const attachments: IncomingAttachment[] = [];
+      for (const input of batch.length ? batch : [event]) attachments.push(...await this.receive(room, input, current));
+      const initialPrompt = batch.length > 1 ? 'Queued messages from the same human in this conversation, in order:\n'
+        + JSON.stringify(batch.map(e => ({ id: e.event_id, text: e.content?.body, type: e.content?.msgtype }))) : prompt;
+      let next: Followup | undefined = { prompt: initialPrompt, event, attachments };
       while (next) {
         controller.signal.throwIfAborted();
         await this.authorize(room, current);
@@ -234,7 +286,7 @@ export class Bridge {
             signal.throwIfAborted();
             await this.authorize(room, current);
             signal.throwIfAborted();
-            return o.background!(input, { room, event: requestEvent, key }, signal);
+            return o.background!(input, { room, event: requestEvent, key: backendKey }, signal);
           } : undefined,
           progress: async text => {
             turnLifetime.signal.throwIfAborted();
@@ -244,10 +296,12 @@ export class Bridge {
           },
         };
         const task = verb === 'publish' ? o.publish!(publication, controller.signal, interact, () => this.authorize(room, current))
-          : o.run(verb as Mode, next.prompt, key, controller.signal, event.sender, next.attachments, interact, publish, hooks);
+          : o.run(verb as Mode, next.prompt.startsWith('!') ? next.prompt : o.decoratePrompt?.(room, next.event, next.prompt) ?? next.prompt,
+            backendKey, controller.signal, event.sender, next.attachments, interact, publish, hooks);
         current.markReady();
         let result: string | BackendReply;
-        try { result = await task; } finally { turnLifetime.abort(); current.running = false; current.interactions.close(); }
+        try { result = await task; if (verb !== 'publish' && !next.prompt.startsWith('!')) o.promptDelivered?.(); }
+        finally { turnLifetime.abort(); current.running = false; current.interactions.close(); }
         while (current.buffered) await current.steering;
         controller.signal.throwIfAborted();
         const respond = (text: string) => o.reply(room, next!.event, text, !next!.prompt.startsWith('!'), next!.prompt.startsWith('!') ? 'm.notice' : 'm.text');
@@ -275,6 +329,7 @@ export class Bridge {
       current.interactions.close();
       clearTimeout(timeout);
       this.active = undefined;
+      void this.drainQueued().catch(o.report);
     }
   }
 
@@ -296,7 +351,7 @@ export class Bridge {
     // Reactions carry the confirmation event ID, not a thread relation. The
     // exact bound message supplies the room/thread scope; never guess a request.
     await this.authorize(room, current);
-    if (this.active !== current || !o.state.claim(event.event_id)) return;
+    if (this.active !== current || !o.state.claim(JSON.stringify([o.botId, event.event_id]))) return;
     const answer = current.interactions.react(relation.event_id, relation.key!);
     if (answer) await o.reply(room, current.event, answer);
   }
@@ -326,7 +381,8 @@ export class Bridge {
       active.controller.signal.throwIfAborted();
       if (active.failed) throw new PublicError('The task failed before your update could be applied. Please resend your message.');
       await this.authorize(room, active);
-      const accepted = active.running && await o.steer!(prompt, active.key, active.controller.signal, active.sender, attachments);
+      const accepted = active.running && await o.steer!(o.decoratePrompt?.(room, event, prompt, true) ?? prompt,
+        active.backendKey, active.controller.signal, active.sender, attachments);
       if (!accepted) active.followups.push({ prompt, event, attachments });
       try {
         if (!feedback) await o.reply(room, event, accepted ? 'Added your message to the current task.' : o.queuedUpdateMessage || 'The current task is finishing. Your message will be processed next.');
