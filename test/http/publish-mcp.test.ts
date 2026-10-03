@@ -122,7 +122,7 @@ if (args.includes('--help')) { console.log('--input-format --output-format --per
 if (args[0] === 'auth') { console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })); process.exit(); }
 if (args.includes('--print')) {
   connection = JSON.parse(args[args.indexOf('--mcp-config') + 1]).mcpServers.riftjack_publish;
-  if (!args.includes('mcp__riftjack_publish__prepare_publish') || connection.timeout !== 86400000) process.exit(2);
+  if (!args[args.indexOf('--allowedTools') + 1].split(',').includes('mcp__riftjack_publish__prepare_publish') || connection.timeout !== 86400000) process.exit(2);
   readline.createInterface({ input: process.stdin }).once('line', async () => {
     const text = await invoke();
     send({ type: 'result', subtype: 'success', is_error: false, result: text, session_id: 'session' });

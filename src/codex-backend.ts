@@ -1,4 +1,6 @@
 import { startBackgroundMcp, BACKGROUND_SERVER, backgroundInstructions } from './background-mcp.js';
+import { attachmentDelivery } from './attachment-delivery.js';
+import { startAttachmentMcp, ATTACHMENT_SERVER } from './attachment-mcp.js';
 import { createHash } from 'node:crypto';
 import type { Config } from './config.js';
 import type { Backend, Steer } from './bridge.js';
@@ -54,10 +56,21 @@ export function createCodexBackend(configuration: Config | (() => Config), state
     const sentProgress = new Set<string>();
     let background: Awaited<ReturnType<typeof startBackgroundMcp>> | undefined;
     let publication: Awaited<ReturnType<typeof startPublishMcp>> | undefined;
+    let media: Awaited<ReturnType<typeof startAttachmentMcp>> | undefined;
+    let delivery: ReturnType<typeof attachmentDelivery> | undefined;
+    const mediaLifetime = new AbortController();
     try {
       if (hooks?.background) background = await startBackgroundMcp(hooks.background, signal);
       if (publish && interact && config.sandbox !== 'read-only') publication = await startPublishMcp(publish, signal);
       const outbox = await outboxDirectory(config.workspace, key);
+      if (hooks?.sendAttachments) {
+        delivery = attachmentDelivery(outbox, config.maxMediaBytes, async (files, callSignal) => {
+          await progress;
+          callSignal.throwIfAborted();
+          return hooks.sendAttachments!(files, callSignal);
+        });
+        media = await startAttachmentMcp(delivery.action, AbortSignal.any([signal, mediaLifetime.signal]));
+      }
       signal.throwIfAborted();
       const server = current.server = new AppServer(config, notification => {
         const p = notification.params;
@@ -73,6 +86,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
           void progress.catch(error => current.done.reject(error));
         }
         if (notification.method === 'turn/completed' && p.turn && (!current.turnId || p.turn.id === current.turnId)) {
+          mediaLifetime.abort();
           current.turnId = p.turn.id; current.ended = true; current.done.resolve(p.turn);
         }
       }, error => current.done.reject(error), interact ? async (request, requestSignal) => {
@@ -97,7 +111,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       }
       const session = state.session(key);
       const saved = session.codex;
-      const instructions = mediaInstructions(outbox, config.maxMediaBytes) + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '');
+      const instructions = mediaInstructions(outbox, config.maxMediaBytes, !!media) + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '');
       const instructionsHash = createHash('sha256').update(instructions).digest('hex');
       const options = {
         cwd: config.workspace, sandbox: config.sandbox, approvalPolicy: interact ? config.codexApprovalPolicy : 'never', approvalsReviewer: 'user', modelProvider: 'openai', model: config.codexModel,
@@ -114,6 +128,10 @@ export function createCodexBackend(configuration: Config | (() => Config), state
           [`mcp_servers.${BACKGROUND_SERVER}`]: background ? { url: background.url, http_headers: background.headers,
             required: true, enabled: true, enabled_tools: ['background_tasks'],
             tools: { background_tasks: { approval_mode: 'approve' } },
+          } : { enabled: false },
+          [`mcp_servers.${ATTACHMENT_SERVER}`]: media ? { url: media.url, http_headers: media.headers,
+            required: true, enabled: true, tool_timeout_sec: Math.ceil(config.timeoutMs / 1000), enabled_tools: ['send_attachments'],
+            tools: { send_attachments: { approval_mode: 'approve' } },
           } : { enabled: false },
           ...(config.codexReasoningEffort ? { model_reasoning_effort: config.codexReasoningEffort } : {}),
         },
@@ -148,9 +166,12 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       if (completed.status !== 'completed') throw new PublicError(completed.status === 'interrupted' ? 'Codex task was interrupted.' : 'Codex task failed. Please retry.');
       for (const item of completed.items || []) if (item.type === 'agentMessage') current.messages.set(item.id, item);
       const messages = [...current.messages.values()].filter(item => item.phase !== 'commentary');
-      return parseMediaReply(messages.at(-1)?.text || '', outbox);
+      const reply = parseMediaReply(messages.at(-1)?.text || '', outbox);
+      return delivery ? delivery.final(reply) : reply;
     } finally {
       current.ended = true;
+      mediaLifetime.abort();
+      await media?.close();
       await progress.catch(() => {});
       await background?.close(); await publication?.close();
       current.ready.resolve();

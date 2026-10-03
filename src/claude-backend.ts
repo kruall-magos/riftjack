@@ -1,4 +1,6 @@
 import { startBackgroundMcp, BACKGROUND_SERVER, BACKGROUND_TOOL, backgroundInstructions } from './background-mcp.js';
+import { attachmentDelivery } from './attachment-delivery.js';
+import { startAttachmentMcp, ATTACHMENT_SERVER, ATTACHMENT_TOOL } from './attachment-mcp.js';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { dirname } from 'node:path';
@@ -125,7 +127,7 @@ export function claudeApprovals(config: Config): boolean {
   return config.sandbox !== 'read-only' && config.claudeApprovalPolicy === 'on-request';
 }
 
-export function claudeArguments(config: Config, session?: string, interactive = false, instructions?: string, publication?: PublishConnection, background?: PublishConnection): string[] {
+export function claudeArguments(config: Config, session?: string, interactive = false, instructions?: string, publication?: PublishConnection, background?: PublishConnection, media?: PublishConnection): string[] {
   const readOnly = config.sandbox === 'read-only';
   const tools = readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash';
   const settings = {
@@ -137,7 +139,7 @@ export function claudeArguments(config: Config, session?: string, interactive = 
   const allowed = readOnly ? ['Read', 'Glob', 'Grep'] : [];
   const servers: Record<string, object> = {};
   for (const [name, connection, tool] of [[PUBLISH_SERVER, !readOnly && publication, PUBLISH_TOOL],
-    [BACKGROUND_SERVER, background, BACKGROUND_TOOL]] as const) {
+    [BACKGROUND_SERVER, background, BACKGROUND_TOOL], [ATTACHMENT_SERVER, media, ATTACHMENT_TOOL]] as const) {
     if (!connection) continue;
     servers[name] = { type: 'http', url: connection.url, headers: connection.headers, timeout: config.timeoutMs };
     allowed.push(tool);
@@ -202,11 +204,22 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       stdin.write({ type: 'control_response', response: { subtype: 'success', request_id: requestId, response } });
     let background: Awaited<ReturnType<typeof startBackgroundMcp>> | undefined;
     let publication: Awaited<ReturnType<typeof startPublishMcp>> | undefined;
+    let media: Awaited<ReturnType<typeof startAttachmentMcp>> | undefined;
+    let delivery: ReturnType<typeof attachmentDelivery> | undefined;
+    const mediaLifetime = new AbortController();
     try {
       if (hooks?.background) background = await startBackgroundMcp(hooks.background, signal);
       if (publish && interact && config.sandbox !== 'read-only') publication = await startPublishMcp(publish, signal);
+      if (hooks?.sendAttachments) {
+        delivery = attachmentDelivery(outbox, config.maxMediaBytes, async (files, callSignal) => {
+          await progress;
+          callSignal.throwIfAborted();
+          return hooks.sendAttachments!(files, callSignal);
+        });
+        media = await startAttachmentMcp(delivery.action, AbortSignal.any([signal, mediaLifetime.signal]));
+      }
       await runClaude(config, claudeArguments(config, savedSession, interactive,
-        mediaInstructions(outbox, config.maxMediaBytes) + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : ''), publication, background), signal, (line, stdin) => {
+        mediaInstructions(outbox, config.maxMediaBytes, !!media) + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : ''), publication, background, media), signal, (line, stdin) => {
       let message: any;
       try { message = JSON.parse(line); } catch { throw new PublicError('Claude Code returned invalid stream-json output. Check its installed version.'); }
       if (typeof message.session_id === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(message.session_id)) {
@@ -252,16 +265,18 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
         if (message.message.content.some((block: any) => block.type === 'tool_use')) flushProgress();
       }
       if (message.type === 'result') {
+        mediaLifetime.abort();
         if (message.is_error || message.subtype !== 'success') throw new PublicError('Claude could not complete the task. Check your Claude account limits, permissions and login on the host.');
         result = typeof message.result === 'string' ? message.result : assistantText;
         close(); stdin.end();
       }
     }, input, interactive);
       await progress;
-    } finally { close(); await progress.catch(() => {}); await background?.close(); await publication?.close(); }
+    } finally { close(); mediaLifetime.abort(); await media?.close(); await progress.catch(() => {}); await background?.close(); await publication?.close(); }
     signal.throwIfAborted();
     if (result === undefined || !sessionId) throw new PublicError('Claude exited without a complete result and session ID. Please retry after checking its installed version.');
-    return parseMediaReply(result, outbox);
+    const reply = parseMediaReply(result, outbox);
+    return delivery ? delivery.final(reply) : reply;
   };
   // Print-mode updates are serialized by Bridge as follow-up turns. Do not claim that
   // writing to stdin guarantees injection into an in-flight Claude model/tool call.

@@ -1,4 +1,5 @@
 import type { BackgroundAction } from './background-tasks.js';
+import type { SendAttachments } from './attachment-delivery.js';
 import type { State } from './state.js';
 import { PublicError } from './accounts.js';
 import { errorMessage } from './errors.js';
@@ -16,7 +17,7 @@ export type MatrixEvent = {
   content?: MediaContent & { 'm.mentions'?: { user_ids?: string[] }; 'm.relates_to'?: { rel_type?: string; event_id?: string; key?: string; 'm.in_reply_to'?: { event_id: string } } };
 };
 export type Mode = 'codex' | 'claude' | 'grok' | 'manager';
-export type BackendHooks = { background?: BackgroundAction; progress?: (text: string) => Promise<void> };
+export type BackendHooks = { background?: BackgroundAction; progress?: (text: string) => Promise<void>; sendAttachments?: SendAttachments };
 export type Backend = (mode: Mode, prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[], interact?: Interact, publish?: PublishAction, hooks?: BackendHooks) => Promise<string | BackendReply>;
 export type Steer = (prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[]) => Promise<boolean>;
 type Options = {
@@ -281,6 +282,13 @@ export class Bridge {
           finally { current.publication = false; }
         } : undefined;
         const hooks: BackendHooks = {
+          sendAttachments: o.sendAttachments ? async (files, callSignal) => {
+            const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
+            signal.throwIfAborted();
+            await this.authorize(room, current);
+            signal.throwIfAborted();
+            await o.sendAttachments!(room, requestEvent, files, signal);
+          } : undefined,
           background: o.background ? async (input, callSignal) => {
             const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
             signal.throwIfAborted();
