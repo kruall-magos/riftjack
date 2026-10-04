@@ -152,11 +152,11 @@ A received mention starts a separate turn for the mentioned agent:
   it from Matrix first.
 - The agent may answer `NO_REPLY`; nothing is sent then.
 - Starting the peer costs **peer credit**. Each local agent has a reserve of at
-  most 3. A new human message to that agent, in its private chat or addressed to
-  it in the shared room, restores the reserve to 3; further messages do not add to
+  most 5. A new human message to that agent, in its private chat or addressed to
+  it in the shared room, restores the reserve to 5; further messages do not add to
   it. Each mention costs the sender one, and the mentioned agent keeps the larger
   of its own reserve and the sender's remainder, never the sum. For example, after
-  a message to one agent its reserve is 3; when it mentions its peer, both have 2.
+  a message to one agent its reserve is 5; when it mentions its peer, both have 4.
   An exchange without new human messages therefore always runs out.
 - A reserve expires a day after the human message it comes from; passing it on
   does not renew it. Only a newly accepted human message restores it: replays,

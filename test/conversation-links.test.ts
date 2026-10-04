@@ -85,9 +85,9 @@ test('an outbound room message can mention the peer only with peer credit', asyn
   assert.equal(typeof content[GRANT], 'string');
   assert.deepEqual({ ...content, [GRANT]: undefined }, { msgtype: 'm.text', body: 'Please review.\n\n' + peer, 'm.mentions': { user_ids: [peer] }, [GRANT]: undefined });
   // More mentions than credit cannot be sent ahead of their delivery.
-  await send('second'); await send('third');
-  await assert.rejects(send('fourth'), /no peer credit/);
-  assert.equal(sent.length, 3);
+  for (let i = 1; i < PEER_CREDIT; i++) await send('paid-' + i);
+  await assert.rejects(send('over-budget'), /no peer credit/);
+  assert.equal(sent.length, PEER_CREDIT);
 });
 
 test('peer credit is restored once per accepted human message, after access checks', async t => {

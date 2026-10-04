@@ -33,7 +33,7 @@ const matrixRoom = (s: unknown): s is string => typeof s === 'string' && /^![^\s
 // (never adds to it); each mention of the peer costs one, and the peer keeps the
 // larger of its own reserve and the sender's remainder. A reserve expires a day
 // after the human message it comes from; passing it on does not renew it.
-export const PEER_CREDIT = 3;
+export const PEER_CREDIT = 5;
 const CREDIT_TTL_MS = 24 * 3_600_000;
 // Longest quoted peer reply included with the turn it starts. Replies that
 // mention a peer are limited further, leaving room for Matrix formatting.
