@@ -168,7 +168,7 @@ test('timers wait until due, survive restart and deliver once as a reminder or a
   assert.match(queue.summary(target.key, target.session), /0 timers pending/);
 });
 
-test('timer input is bounded, cancellable, and an undeliverable timer is dropped rather than sent late', async t => {
+test('timer input is bounded and cancellable, and a late timer arrives with its delay', async t => {
   const f = setup(t);
   const base = { action: 'remind', label: 'Later', message: 'Hello', deliver: 'room' };
   for (const bad of [{ ...base }, { ...base, delay_minutes: 0 }, { ...base, delay_minutes: 10081 }, { ...base, delay_minutes: 5, at: new Date().toISOString() },
@@ -178,10 +178,15 @@ test('timer input is bounded, cancellable, and an undeliverable timer is dropped
   }
   const cancelled = JSON.parse(f.queue.action({ ...base, delay_minutes: 5 }, target, signal()));
   assert.equal(JSON.parse(f.queue.action({ action: 'cancel', id: cancelled.id }, target, signal())).state, 'cancelled');
-  JSON.parse(f.queue.action({ ...base, delay_minutes: 5 }, target, signal()));
-  // A busy or private-room refusal keeps it pending; a day later it is dropped.
+  const scheduled = JSON.parse(f.queue.action({ ...base, delay_minutes: 5 }, target, signal()));
+  // The confirmation shows what will be sent and where.
+  assert.deepEqual([scheduled.room, scheduled.message, scheduled.deliver], [target.room, 'Hello', 'room']);
+  // A refusal (busy bot, changed room privacy) keeps it pending; later it arrives marked late.
   await f.queue.pump({ valid: () => true, report, deliver: async () => false, post: async () => false }, Date.now() + 6 * 60_000);
   assert.match(f.queue.summary(target.key, target.session), /1 timers pending/);
-  await f.queue.pump({ valid: () => true, report, deliver: async () => false, post: async () => assert.fail('Late timer must not be sent') }, Date.now() + 25 * 3_600_000);
+  const late: string[] = [];
+  await f.queue.pump({ valid: () => true, report, deliver: async () => false,
+    post: async (_t, text, admit) => { admit(); late.push(text); return true; } }, Date.now() + 65 * 60_000);
+  assert.match(late[0], /^Hello\n\n\(Scheduled for .*; delivered 6\d minutes late\.\)$/);
   assert.match(f.queue.summary(target.key, target.session), /0 timers pending/);
 });

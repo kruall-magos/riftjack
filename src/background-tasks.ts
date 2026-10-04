@@ -65,7 +65,7 @@ export class BackgroundTasks {
     if (!record(input)) throw new PublicError('Supply a background task action.');
     const visible = (w: Watch) => w.key === target.key && w.session === target.session;
     if (input.action === 'list' && Object.keys(input).length === 1) return JSON.stringify(this.watches.filter(visible).map(w => w.timer
-      ? { id: w.id, label: w.label, kind: 'timer', deliver: w.timer.deliver, due: new Date(w.expires).toISOString(), state: w.state }
+      ? { id: w.id, label: w.label, kind: 'timer', deliver: w.timer.deliver, room: w.room, due: new Date(w.expires).toISOString(), message: w.timer.message, state: w.state }
       : { id: w.id, label: w.label, status_file: w.file, state: w.state, result: w.result, expires: new Date(w.expires).toISOString() }));
     if (input.action === 'remind') {
       const at = typeof input.at === 'string' && /T.*(?:Z|[+-]\d\d:\d\d)$/.test(input.at) ? Date.parse(input.at) : NaN;
@@ -82,7 +82,8 @@ export class BackgroundTasks {
       const timer: Watch = { ...target, id: randomUUID(), workspace: this.workspace, label: input.label, file: '', field: '', terminal: [],
         expires: due, state: 'waiting', timer: { message: input.message, deliver: input.deliver as 'agent' | 'room' } };
       this.watches.push(timer); this.save();
-      return JSON.stringify({ id: timer.id, state: timer.state, deliver: input.deliver, due: new Date(due).toISOString() });
+      // Echo what will be sent and where, so it can be shown to the conversation partner.
+      return JSON.stringify({ id: timer.id, state: timer.state, deliver: input.deliver, room: target.room, due: new Date(due).toISOString(), message: input.message });
     }
     if (input.action === 'cancel' && Object.keys(input).every(k => ['action', 'id'].includes(k))) {
       const watch = this.watches.find(w => w.id === input.id && visible(w));
@@ -131,12 +132,7 @@ export class BackgroundTasks {
       for (const watch of this.watches) {
         if (watch.state !== 'waiting') continue;
         if (watch.workspace !== this.workspace || !options.valid(watch)) { watch.state = 'cancelled'; this.save(); continue; }
-        if (watch.timer) {
-          // A timer that could not be delivered for a day after it was due is dropped, not sent late.
-          if (now >= watch.expires + 86_400_000) { watch.state = 'cancelled'; watch.result = 'undeliverable'; this.save(); }
-          else if (now >= watch.expires) await this.fire(watch, options);
-          continue;
-        }
+        if (watch.timer) { if (now >= watch.expires) await this.fire(watch, options, now); continue; }
         let outcome = now >= watch.expires ? 'watch_expired' : undefined;
         if (!outcome) {
           try {
@@ -166,8 +162,12 @@ export class BackgroundTasks {
   }
   // Like a watch result, a due timer is admitted at most once: a crash after
   // admission leaves it interrupted rather than sending it again.
-  private async fire(timer: Watch, options: Parameters<BackgroundTasks['pump']>[0]) {
-    const { message, deliver } = timer.timer!;
+  private async fire(timer: Watch, options: Parameters<BackgroundTasks['pump']>[0], now: number) {
+    const { deliver } = timer.timer!;
+    // A late timer (connector offline or bot busy) still arrives, saying so.
+    const lateMinutes = Math.floor((now - timer.expires) / 60_000);
+    const message = timer.timer!.message + (lateMinutes >= 2
+      ? `\n\n(Scheduled for ${new Date(timer.expires).toISOString()}; delivered ${lateMinutes} minutes late.)` : '');
     const admitted = () => { timer.state = 'dispatching'; timer.result = 'due'; this.save(); };
     try {
       let accepted: boolean;

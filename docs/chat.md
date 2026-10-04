@@ -45,9 +45,10 @@ bot's own reminder. `deliver: "room"` posts the message to the conversation as
 the bot without starting a turn; it does not mention anyone. Use `at` with an ISO
 8601 time and offset instead of `delay_minutes` for a fixed time. Timers survive
 restarts, are listed with `action: "list"`, and can be cancelled before they are
-due. A busy bot delivers an agent reminder after its current task. A timer that
-cannot be delivered within a day of its due time is dropped rather than sent late,
-and a crash during delivery is never replayed.
+due. The confirmation and the list show the room and the exact text. A busy bot
+delivers an agent reminder after its current task. A timer delivered more than a
+minute late, for example after the connector was stopped, says when it was due and
+how late it is. A crash during delivery is never replayed.
 
 Have the background process write a terminal state on both success and failure.
 Prefer writing a temporary file and renaming it over the status file. The selected
