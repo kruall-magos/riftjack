@@ -180,9 +180,13 @@ test('agent observations persist, do not become instructions or cross-room steer
   f.links.observe(bot, group, message('A shared finding', '$peer', peer));
   f.links.observe(bot, group, message('A shared finding', '$peer', peer));
   f.links.observe(bot, home, message('Private detail', '$private'));
-  // Connector commands are not observations, including behind a reply quote.
+  // Connector commands are not observations, including behind the quote of a Matrix reply.
   assert.equal(f.links.observe(bot, group, message('!restart', '$command')), false);
-  assert.equal(f.links.observe(bot, group, message('> earlier\n\n !status', '$quoted-command')), false);
+  const reply = message('> earlier\n\n !status', '$quoted-command');
+  Object.assign(reply.content!, { 'm.relates_to': { 'm.in_reply_to': { event_id: '$earlier' } } });
+  assert.equal(f.links.observe(bot, group, reply), false);
+  // Without reply metadata the bridge sends the whole text to the model, so it stays an observation.
+  assert.equal(f.links.observe(bot, group, message('> Example command\n\n!status', '$plain-quote')), true);
   const resumed = f.load();
   const prompt = resumed.prompt(bot, group, message('Next', '$next'), 'Next');
   assert.equal(prompt.split('A shared finding').length - 1, 1);
