@@ -10,6 +10,7 @@ import { PublicError } from './accounts.js';
 import { mediaInstructions, outboxDirectory, parseMediaReply, type IncomingAttachment } from './media.js';
 import { AppServer, RpcError, type AgentMessage, type CodexInput, type Turn } from './app-server.js';
 import { codexInteraction } from './codex-interactions.js';
+import { approvalInstructions } from './approval-instructions.js';
 import { installPlugin } from './plugins.js';
 import { engineReport } from './bot-status.js';
 import { startPublishMcp, PUBLISH_SERVER, publicationInstructions } from './publish-mcp.js';
@@ -119,7 +120,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       }
       const session = state.session(key);
       const saved = session.codex;
-      const instructions = mediaInstructions(outbox, config.maxMediaBytes, !!media) + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '');
+      const instructions = mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('codex') + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '');
       const instructionsHash = createHash('sha256').update(instructions).digest('hex');
       const options = {
         cwd: config.workspace, sandbox: config.sandbox, approvalPolicy: interact ? config.codexApprovalPolicy : 'never', approvalsReviewer: 'user', modelProvider: 'openai', model: config.codexModel,
@@ -159,7 +160,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
         await server.request('thread/inject_items', {
           threadId: current.threadId,
           items: [{ type: 'message', role: 'developer', content: [{ type: 'input_text',
-            text: 'Updated Matrix connector instructions. These supersede earlier Matrix attachment delivery instructions.\n' + instructions }] }],
+            text: 'Updated Matrix connector instructions. These supersede earlier Matrix connector instructions.\n' + instructions }] }],
         });
         signal.throwIfAborted();
       }

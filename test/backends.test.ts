@@ -10,6 +10,7 @@ import type { BackendReply } from '../src/media.js';
 import { Bridge, type MatrixEvent } from '../src/bridge.js';
 import { configForWorkspace } from '../src/workspace.js';
 import { codexUsage } from '../src/codex-usage.js';
+import { approvalInstructions } from '../src/approval-instructions.js';
 
 function setup(t: { after(fn: () => void): void }, accountType = 'chatgpt') {
   const dir = mkdtempSync(join(tmpdir(), 'matrix-app-server-'));
@@ -241,7 +242,22 @@ test('connector instructions are Codex developer instructions, not part of the u
   const f = setup(t);
   await f.backend('codex', 'hello', 'key', signal(), '@owner:test');
   assert.match(f.calls().find(c => c.method === 'thread/start').params.developerInstructions, /conversation's outbox: ".*outbox"/);
+  assert.ok(f.calls().find(c => c.method === 'thread/start').params.developerInstructions.includes(approvalInstructions('codex')));
   assert.equal(f.calls().find(c => c.method === 'turn/start').params.input[0].text, 'hello');
+});
+
+test('existing Codex sessions receive approval judgment instructions once before the next model turn', async t => {
+  const f = setup(t);
+  f.state.update('key', { codex: 'thread_1', codexInstructionsHash: 'before-approval-judgment' });
+  await f.backend('codex', 'continue', 'key', signal(), '@owner:test');
+  const calls = f.calls();
+  const injected = calls.findIndex(c => c.method === 'thread/inject_items');
+  assert.ok(injected >= 0 && injected < calls.findIndex(c => c.method === 'turn/start'));
+  assert.equal(calls[injected].params.items[0].role, 'developer');
+  assert.ok(calls[injected].params.items[0].content[0].text.includes(approvalInstructions('codex')));
+  assert.equal(calls.find(c => c.method === 'thread/resume').params.threadId, 'thread_1');
+  await f.backend('codex', 'again', 'key', signal(), '@owner:test');
+  assert.equal(f.calls().filter(c => c.method === 'thread/inject_items').length, 1);
 });
 
 test('resuming a Codex conversation explicitly refreshes the attachment limit', async t => {

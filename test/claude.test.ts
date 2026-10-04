@@ -12,6 +12,7 @@ import { Bridge, sessionKey, type Backend, type MatrixEvent } from '../src/bridg
 import { provision } from '../src/accounts.js';
 import type { BackendReply } from '../src/media.js';
 import { configForWorkspace } from '../src/workspace.js';
+import { approvalInstructions } from '../src/approval-instructions.js';
 
 function setup(t: { after(fn: () => void): void }, options: { auth?: string; malformed?: boolean; legacy?: boolean } = {}) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'matrix-claude-')));
@@ -126,6 +127,21 @@ test('Claude readiness checks options and login without a model request', async 
   const f = setup(t);
   await checkClaude(f.config);
   assert.deepEqual(f.calls().map(call => call.args), [['--help'], ['auth', 'status', '--json']]);
+});
+
+test('new and resumed Claude sessions receive approval judgment in the system prompt', async t => {
+  const f = setup(t);
+  await f.backend('claude', 'hello', 'key', signal(), '@owner:test');
+  await f.backend('claude', 'continue', 'key', signal(), '@owner:test');
+  const runs = f.calls().filter(call => call.args?.includes('--append-system-prompt'));
+  assert.equal(runs.length, 2);
+  for (const { args } of runs) {
+    const instructions = args[args.indexOf('--append-system-prompt') + 1];
+    assert.ok(instructions.includes(approvalInstructions('claude')));
+    assert.ok(!instructions.includes('omit prefix_rule'));
+  }
+  assert.ok(runs[1].args.includes('--resume'));
+  assert.equal(f.calls().filter(call => call.input).at(-1).input.message.content[0].text, 'continue');
 });
 
 test('missing Claude executable fails with setup instructions without affecting Codex configuration', async t => {

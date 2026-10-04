@@ -12,6 +12,7 @@ import type { Config } from './config.js';
 import type { State } from './state.js';
 import { PublicError } from './accounts.js';
 import { imageMime, mediaInstructions, outboxDirectory, parseMediaReply, readOutgoing, type IncomingAttachment } from './media.js';
+import { approvalInstructions } from './approval-instructions.js';
 import { CLAUDE_DENY, claudeInteraction } from './claude-interactions.js';
 import { startPublishMcp, PUBLISH_SERVER, PUBLISH_TOOL, publicationInstructions, type PublishConnection } from './publish-mcp.js';
 
@@ -222,7 +223,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
         media = await startAttachmentMcp(delivery.action, AbortSignal.any([signal, mediaLifetime.signal]));
       }
       await runClaude(config, claudeArguments(config, savedSession, interactive,
-        mediaInstructions(outbox, config.maxMediaBytes, !!media) + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : ''), publication, background, media, rooms), signal, (line, stdin) => {
+        mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('claude') + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : ''), publication, background, media, rooms), signal, (line, stdin) => {
       let message: any;
       try { message = JSON.parse(line); } catch { throw new PublicError('Claude Code returned invalid stream-json output. Check its installed version.'); }
       if (typeof message.session_id === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(message.session_id)) {
