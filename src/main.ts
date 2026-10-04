@@ -425,7 +425,8 @@ async function main() {
       }
       phase('deviceIdentity');
       await client.start();
-      phase('start');
+      // start() launches the sync loop without waiting for the first /sync response.
+      phase('clientStart');
       online = true;
       console.log(account.name + ' (' + account.kind + ') online: ' + account.userId);
       console.log(JSON.stringify({ time: new Date().toISOString(), event: 'bot-startup', bot: account.userId,
