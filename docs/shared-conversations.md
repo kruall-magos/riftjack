@@ -94,7 +94,8 @@ the same agent session in two connectors.
   up to the prompt budget. Overflow and messages from the next room stay queued.
   Attachments remain attached to their batch.
 - Shared messages are recorded as observations, with independent read positions
-  for each local agent. Before a new turn, unread text and attachment metadata are
+  for each local agent. Connector commands (`!restart`, `!status` and so on) are
+  not recorded: they control the bots and are not part of the conversation. Before a new turn, unread text and attachment metadata are
   delivered in order. Oversized messages are explicitly split, retaining the rest
   on disk. Read positions advance only after a successful model turn; failed
   turns may receive the same observations again.

@@ -151,6 +151,10 @@ export class ConversationLinks {
     if (!shared || !content || !event.event_id || !event.sender || event.type !== 'm.room.message' || content[SERVICE] ||
         ![shared.owner, ...shared.bots].includes(event.sender) || !['m.text', 'm.image', 'm.file', 'm.audio'].includes(content?.msgtype ?? '') ||
         typeof content.body !== 'string' || content['m.relates_to']?.rel_type === 'm.replace') return false;
+    // Connector commands (text starting with !, after reply quotes) control the
+    // bots and are not part of the conversation agents read.
+    if (event.sender === shared.owner && content.msgtype === 'm.text' &&
+        content.body.replace(/^>[^\n]*(?:\r?\n>[^\n]*)*\r?\n\r?\n/, '').trim().startsWith('!')) return false;
     const members = JSON.stringify([shared.owner, ...shared.bots.slice().sort()]);
     const log = this.history[room]?.members === members ? this.history[room]
       : { members, messages: [], next: 1, seen: [], readers: {} };

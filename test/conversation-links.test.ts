@@ -180,6 +180,9 @@ test('agent observations persist, do not become instructions or cross-room steer
   f.links.observe(bot, group, message('A shared finding', '$peer', peer));
   f.links.observe(bot, group, message('A shared finding', '$peer', peer));
   f.links.observe(bot, home, message('Private detail', '$private'));
+  // Connector commands are not observations, including behind a reply quote.
+  assert.equal(f.links.observe(bot, group, message('!restart', '$command')), false);
+  assert.equal(f.links.observe(bot, group, message('> earlier\n\n !status', '$quoted-command')), false);
   const resumed = f.load();
   const prompt = resumed.prompt(bot, group, message('Next', '$next'), 'Next');
   assert.equal(prompt.split('A shared finding').length - 1, 1);
