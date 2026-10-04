@@ -12,7 +12,7 @@ import type { Backend, Steer } from './bridge.js';
 import type { Config } from './config.js';
 import type { State } from './state.js';
 import { PublicError } from './accounts.js';
-import { imageMime, mediaInstructions, outboxDirectory, parseMediaReply, readOutgoing, type IncomingAttachment } from './media.js';
+import { imageMime, MAX_ATTACHMENTS, mediaInstructions, outboxDirectory, parseMediaReply, readOutgoing, type BackendReply, type IncomingAttachment } from './media.js';
 import { approvalInstructions } from './approval-instructions.js';
 import { CLAUDE_DENY, claudeInteraction } from './claude-interactions.js';
 import { startPublishMcp, PUBLISH_SERVER, PUBLISH_TOOL, publicationInstructions, type PublishConnection } from './publish-mcp.js';
@@ -20,6 +20,16 @@ import { startPublishMcp, PUBLISH_SERVER, PUBLISH_TOOL, publicationInstructions,
 const record = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
 // How long a finished turn waits for the echo of an update written just before its result.
 const UPDATE_GRACE_MS = 5000;
+
+// Answers of extra turns started by updates are parsed separately and appended;
+// their attachments are merged without duplicates, within the per-reply limit.
+function combineReplies(replies: (string | BackendReply)[]): string | BackendReply {
+  if (replies.length === 1) return replies[0];
+  const text = replies.map(reply => typeof reply === 'string' ? reply : reply.text).filter(Boolean).join('\n\n');
+  const attachments = [...new Map(replies.flatMap(reply => typeof reply === 'string' ? [] : reply.attachments).map(file => [file.path, file])).values()];
+  if (attachments.length > MAX_ATTACHMENTS) throw new PublicError(`Send at most ${MAX_ATTACHMENTS} attachments per reply.`);
+  return attachments.length ? { text, attachments } : text;
+}
 
 function claudeEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
@@ -277,7 +287,12 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       // Only the replayed copy of an update we wrote confirms it; tool results are also user messages.
       if (message.type === 'user' && message.isReplay === true && typeof message.uuid === 'string') {
         const update = updates.get(message.uuid);
-        if (update) { updates.delete(message.uuid); update.resolve(true); }
+        if (update) {
+          updates.delete(message.uuid); update.resolve(true);
+          // A confirmed update after an early result starts one more turn: wait for
+          // its result (or cancellation and the task timeout), not for the grace timer.
+          if (grace && !updates.size) { clearTimeout(grace); grace = undefined; }
+        }
         return;
       }
       if (message.type === 'system' && message.subtype === 'init') {
@@ -332,10 +347,9 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       close(); mediaLifetime.abort(); await media?.close(); await rooms?.close(); await progress.catch(() => {}); await background?.close(); await publication?.close();
     }
     signal.throwIfAborted();
+    if (!results.length || !sessionId) throw new PublicError('Claude exited without a complete result and session ID. Please retry after checking its installed version.');
     // A confirmed update that started one more turn adds that turn's answer.
-    const result = results.length ? results.join('\n\n') : undefined;
-    if (result === undefined || !sessionId) throw new PublicError('Claude exited without a complete result and session ID. Please retry after checking its installed version.');
-    const reply = parseMediaReply(result, outbox);
+    const reply = combineReplies(results.map(text => parseMediaReply(text, outbox)));
     return delivery ? delivery.final(reply) : reply;
   };
   // With --replay-user-messages, an update is written to the running turn's input

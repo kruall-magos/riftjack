@@ -76,6 +76,26 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
     onUpdate = update => { finish('First answer'); setTimeout(() => { echo(update); finish('Second answer to ' + updateText(update)); }, 50); };
     return;
   }
+  if (prompt.includes('[late-slow]')) {
+    record({ waitingUpdate: true });
+    let ended = false;
+    process.stdin.on('end', () => { ended = true; });
+    onUpdate = update => {
+      finish('First answer');
+      setTimeout(() => echo(update), 50);
+      setTimeout(() => { record({ endBeforeSecondResult: ended }); finish('Second answer'); }, 5500);
+    };
+    return;
+  }
+  if (prompt.includes('[late-files]')) {
+    record({ waitingUpdate: true });
+    const manifest = file => String.fromCharCode(96).repeat(3) + 'matrix-attachments\\n' + JSON.stringify({ files: [{ path: file }] }) + '\\n' + String.fromCharCode(96).repeat(3);
+    onUpdate = update => {
+      finish('First answer\\n' + manifest('first.txt'));
+      setTimeout(() => { echo(update); finish('Second answer\\n' + manifest('second.txt')); }, 50);
+    };
+    return;
+  }
   if (prompt.includes('[noecho]')) { record({ waitingUpdate: true }); onUpdate = () => finish('Answer without echo'); return; }
   if (prompt.includes('[bad-json]')) { console.log('invalid JSON'); return; }
   if (prompt.includes('[wait]')) { record({ waiting: true }); setInterval(() => {}, 1000); return; }
@@ -419,6 +439,25 @@ test('an update echoed after an early result adds the next answer to the same ta
   await until(() => f.calls().some(call => call.waitingUpdate));
   assert.equal(await f.backend.steer('one more thing', 'key', signal(), '@owner:test'), true);
   assert.equal(await task, 'First answer\n\nSecond answer to one more thing');
+});
+
+test('a confirmed extra turn keeps input and tools open longer than the echo grace', async t => {
+  const f = setup(t, { replay: true });
+  const task = f.backend('claude', '[late-slow]', 'key', signal(), '@owner:test');
+  await until(() => f.calls().some(call => call.waitingUpdate));
+  assert.equal(await f.backend.steer('continue', 'key', signal(), '@owner:test'), true);
+  assert.equal(await task, 'First answer\n\nSecond answer');
+  assert.equal(f.calls().find(call => 'endBeforeSecondResult' in call).endBeforeSecondResult, false);
+});
+
+test('attachments of an extra turn are merged with those of the first answer', async t => {
+  const f = setup(t, { replay: true });
+  const task = f.backend('claude', '[late-files]', 'key', signal(), '@owner:test');
+  await until(() => f.calls().some(call => call.waitingUpdate));
+  assert.equal(await f.backend.steer('another file', 'key', signal(), '@owner:test'), true);
+  const result = await task as BackendReply;
+  assert.deepEqual(result.attachments.map(file => file.path.split('/').at(-1)), ['first.txt', 'second.txt']);
+  assert.match(result.text, /First answer[^]*Second answer/);
 });
 
 test('an update without an echo is reported as unconfirmed, never resent', async t => {
