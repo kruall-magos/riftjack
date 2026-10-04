@@ -165,6 +165,11 @@ export class Bridge {
     const publishCommand = !media && /^!publish(?:\s|$)/.test(prompt);
     const restartSupervisor = !media && /^!restart\s+supervisor$/.test(prompt);
     const verb = publishCommand ? 'publish' : restartSupervisor ? 'restart' : (!media && /^!(help|reset|cancel|restart|usage|status)$/.exec(prompt)?.[1]) || o.kind;
+    // All local bots share State. Claim this connector-wide command once,
+    // after authorization but before even the stopping/busy reply. Persisting
+    // the claim also silences delayed copies received after the restart.
+    if (verb === 'restart' && event.sender === o.owner &&
+      !o.state.claim(JSON.stringify(['connector-restart', room, event.event_id]))) return;
     const key = sessionKey(room, event);
     const backendKey = o.linkedSession?.(room, event) ?? key;
     // Room-state requests may finish out of order. Preserve incoming admission

@@ -364,6 +364,79 @@ for (const kind of ['codex', 'claude', 'manager'] as const) test(kind + ' handle
   assert.equal(restarts, 1); assert.deepEqual(f.calls, []); assert.deepEqual(f.replies, ['Restarting']);
 });
 
+for (const command of ['!restart', '!restart supervisor']) for (const reverse of [false, true])
+test(`${command} is claimed across bots before acknowledgement, stopping replies and process replacement (reverse=${reverse})`, async t => {
+  const base = fixture(t), ready = gate(), release = gate();
+  const replies: string[] = [], exits: number[] = [];
+  const restart = new RestartController({ supported: true, supervisorSupported: true, busy: () => false,
+    shutdown: code => exits.push(code) });
+  const bots = ['@first:test', '@second:test'].map(botId => fixture(t, 'codex', undefined, true, {
+    botId, state: base.state, isStopping: () => restart.pending,
+    restart: (reply, target, scope) => restart.request(reply, target, scope),
+    reply: async (_room, _event, text) => {
+      replies.push(text);
+      if (replies.length === 1) { ready.release(); await release.promise; }
+    },
+  }));
+  if (reverse) bots.reverse();
+  const incoming = event(command, '$shared-restart');
+  const first = bots[0].bridge.handle('!shared:test', incoming);
+  await ready.promise;
+  await bots[1].bridge.handle('!shared:test', incoming);
+  assert.equal(replies.length, 1);
+  assert.deepEqual(exits, []);
+  release.release(); await first;
+  assert.equal(exits.length, 1);
+  bots[1].bridge.stop();
+  await bots[1].bridge.handle('!shared:test', incoming);
+  assert.equal(replies.length, 1);
+  // Use a third bot so this exercises the global persisted claim, not its own
+  // per-bot duplicate filter or the startup timestamp cutoff.
+  const replacement = fixture(t, 'codex', undefined, true, {
+    botId: '@third:test', state: new State(base.file),
+    restart: async () => assert.fail('replayed restart'),
+  });
+  await replacement.bridge.handle('!shared:test', incoming);
+  assert.deepEqual(replacement.replies, []);
+  assert.deepEqual(bots.flatMap(bot => bot.errors), []);
+});
+
+test('shared restart refusal is delivered once and a new command can retry', async t => {
+  const base = fixture(t);
+  let busy = true;
+  const exits: number[] = [];
+  const restart = new RestartController({ supported: true, busy: () => busy, shutdown: code => exits.push(code) });
+  const bots = ['@first:test', '@second:test'].map(botId => fixture(t, 'codex', undefined, true, {
+    botId, state: base.state, isStopping: () => restart.pending,
+    restart: (reply, target, scope) => restart.request(reply, target, scope),
+  }));
+  await Promise.all(bots.map(bot => bot.bridge.handle('!shared:test', event('!restart', '$busy'))));
+  assert.equal(bots.flatMap(bot => bot.replies).length, 1);
+  assert.match(bots.flatMap(bot => bot.replies)[0], /busy/);
+  assert.deepEqual(exits, []);
+  busy = false;
+  await Promise.all(bots.map(bot => bot.bridge.handle('!shared:test', event('!restart', '$retry'))));
+  assert.deepEqual(exits, [RESTART_EXIT_CODE]);
+  assert.equal(bots.flatMap(bot => bot.replies).length, 2);
+});
+
+test('another bot does not retry a shared restart after uncertain acknowledgement delivery', async t => {
+  const base = fixture(t);
+  const exits: number[] = [];
+  let sends = 0;
+  const restart = new RestartController({ supported: true, busy: () => false, shutdown: code => exits.push(code) });
+  const bots = ['@first:test', '@second:test'].map(botId => fixture(t, 'codex', undefined, true, {
+    botId, state: base.state,
+    restart: (reply, target, scope) => restart.request(reply, target, scope),
+    reply: async () => { if (++sends === 1) throw new Error('uncertain send'); },
+  }));
+  await bots[0].bridge.handle('!shared:test', event('!restart', '$uncertain'));
+  await bots[1].bridge.handle('!shared:test', event('!restart', '$uncertain'));
+  assert.equal(sends, 1); assert.deepEqual(exits, []);
+  await bots[1].bridge.handle('!shared:test', event('!restart', '$explicit-retry'));
+  assert.equal(sends, 2); assert.deepEqual(exits, [RESTART_EXIT_CODE]);
+});
+
 test('restart forwards the exact requesting bot, room, event, owner and thread', async t => {
   const f = fixture(t, 'codex', undefined, true, { restart: async (reply, target) => {
     assert.deepEqual(target, { botId: '@bot:test', roomId: '!another:test', sender: '@owner:test', eventId: '$restart', threadId: '$root' });
