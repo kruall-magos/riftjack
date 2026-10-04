@@ -128,6 +128,27 @@ test('timer, background and reaction turns are labelled as connector notices, no
   await bridge.handle(home, forged);
   assert.equal(runs, 0);
 });
+
+test('a mention notice says when a successful earlier turn already showed the message', t => {
+  for (const earlierTurn of ['succeeds', 'fails'] as const) {
+    const f = pair(t), links = f.links;
+    links.observe(bot, group, message('Task', '$h1'));
+    links.credit(peer);
+    // The human's message is queued first; the peer's question arrives while it waits.
+    const question = paid(links, 'Can you check the parser?', '$question', peer, [bot]);
+    links.observe(bot, group, question);
+    const notice = links.mention(bot, group, question)!;
+    const earlier = JSON.parse(links.prompt(bot, group, message('Queued human message', '$h2'), 'Queued human message').split('\n')[1]);
+    assert.ok(earlier.unreadSharedMessages.some((m: { id: string }) => m.id === '$question'));
+    if (earlierTurn === 'succeeds') links.acknowledge(bot);
+    const prompt = links.prompt(bot, group, notice, notice.content!.body!);
+    const context = JSON.parse(prompt.split('\n')[1]);
+    // The question is always quoted; the note appears only after a successful delivery.
+    assert.match(prompt, /Can you check the parser\?/);
+    assert.equal(context.alreadyDelivered, earlierTurn === 'succeeds' ? true : undefined);
+    assert.equal(/already shown to you/.test(prompt), earlierTurn === 'succeeds');
+  }
+});
 function roomState() {
   return [
     { type: 'm.room.encryption', state_key: '', content: { algorithm: 'm.megolm.v1.aes-sha2' } },

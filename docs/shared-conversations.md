@@ -150,6 +150,10 @@ A received mention starts a separate turn for the mentioned agent:
   notice.
 - Each agent evaluates a peer message once, regardless of which bot received
   it from Matrix first.
+- If an earlier successful turn already showed the mentioning message as an
+  unread observation (for example, a queued human message ran first), the notice
+  still quotes it but says so, with `alreadyDelivered: true`, so the agent can
+  avoid answering twice. After a failed earlier turn the notice is unchanged.
 - The agent may answer `NO_REPLY`; nothing is sent then.
 - Starting the peer costs **peer credit**. Each local agent has a reserve of at
   most 5. A new human message to that agent, in its private chat or addressed to

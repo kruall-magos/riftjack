@@ -278,6 +278,7 @@ export class ConversationLinks {
   prompt(bot: string, room: string, event: MatrixEvent, prompt: string, steering = false): string {
     const a = this.agent(bot)!, trigger = event.content?.[AGENT_TRIGGER], notice = event.content?.[NOTICE];
     const shared = this.room(bot, room);
+    const shownBefore = !!trigger && !!shared && this.shownBefore(bot, room, trigger.events?.length ? trigger.events : [trigger.event]);
     const rooms = steering ? [] : shared ? [shared] : this.config.rooms.filter(r => r.bots.includes(bot));
     const unread: (Entry & { room: string; offset: number; continues: boolean })[] = [];
     const delivery: Delivery = {}, connectorNotes: string[] = [];
@@ -327,7 +328,22 @@ export class ConversationLinks {
       + '\n' + JSON.stringify({ room, visibility: shared ? 'shared' : 'private', human: a.owner,
         author: trigger?.agent ?? (notice && notice !== 'reaction' ? 'connector' : event.sender),
         trigger: trigger ? 'agent-mention' : notice ?? 'human-message', participants: shared ? [shared.owner, ...shared.bots] : [a.owner, bot],
-        unreadSharedMessages: unread, remainingMessages, ...(shared && { peerCredit: this.peerCredit(bot) }), ...(connectorNotes.length && { connectorNotes }) })
-      + (trigger || notice ? '\nCurrent connector notice:\n' : '\nCurrent human message:\n') + prompt;
+        unreadSharedMessages: unread, remainingMessages, ...(shared && { peerCredit: this.peerCredit(bot) }), ...(shownBefore && { alreadyDelivered: true }),
+        ...(connectorNotes.length && { connectorNotes }) })
+      + (trigger || notice ? '\nCurrent connector notice:\n' : '\nCurrent human message:\n')
+      + (shownBefore ? 'This mention was already shown to you as an unread observation in an earlier turn. '
+        + 'If you have already answered it, a second answer is not needed: reply with exactly NO_REPLY.\n' : '') + prompt;
+  }
+  // Whether a successful earlier turn already delivered these messages to the
+  // agent as observations: its read position passed them without quoting them.
+  // A message pruned from the log was passed by every local reader.
+  private shownBefore(bot: string, room: string, ids: string[]): boolean {
+    const log = this.log(room), cursor = log?.readers[bot];
+    if (!log || !cursor) return false;
+    return ids.every(id => {
+      if (log.quoted?.[bot]?.includes(id)) return false;
+      const entry = log.messages.find(m => m.id === id);
+      return entry ? entry.seq < cursor.seq : log.seen.includes(id);
+    });
   }
 }
