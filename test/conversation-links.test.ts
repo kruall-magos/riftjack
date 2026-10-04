@@ -500,3 +500,18 @@ test('mentions trigger once per recipient in any delivery order and carry the wh
   assert.deepEqual(partial.content![AGENT_TRIGGER]!.events, []);
   assert.match(g.links.prompt(bot, group, partial, partial.content!.body!), /IMPORTANT-FIRST-PART[^]*"truncated":true/);
 });
+
+test('an agent may decline a shared-room human message with NO_REPLY, but not a private one', async t => {
+  const f = fixture(t), replies: [string, string][] = [];
+  const bridge = new Bridge({ botId: bot, owner: human, kind: 'codex', state: f.state, since: 0, timeoutMs: 5000,
+    isAuthorized: id => id === human, isPrivateRoom: async () => true,
+    linkedSession: (room, event) => f.links.key(bot, room, event), shared: room => !!f.links.room(bot, room),
+    run: async () => 'NO_REPLY', reply: async (room, _event, text) => { replies.push([room, text]); }, report: e => { throw e; },
+  });
+  await bridge.handle(group, message('For the reviewer', '$shared'));
+  // No acknowledgement and no answer in the shared room.
+  assert.equal(replies.length, 0);
+  await bridge.handle(home, message('Hello', '$private'));
+  assert.deepEqual(replies, [[home, '…'], [home, 'NO_REPLY']]);
+  assert.match(f.links.prompt(bot, group, message('Hi', '$h'), 'Hi'), /exactly NO_REPLY/);
+});

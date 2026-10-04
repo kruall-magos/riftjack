@@ -55,6 +55,9 @@ type Options = {
   promptDelivered?: () => void;
   // Extracts a validated peer mention request from a final reply in a shared room.
   mentions?: (room: string, text: string) => Mentions | undefined;
+  // Shared rooms: the agent may decline a human message with NO_REPLY, so no
+  // acknowledgement is sent before it decides.
+  shared?: (room: string) => boolean;
 };
 function help(kind: Mode): string {
   return kind === 'manager' ? MANAGER_HELP : botHelp(kind);
@@ -268,7 +271,7 @@ export class Bridge {
     try {
       background?.admitted();
       if (verb === 'publish') await reply('Preparing the complete publication review…');
-      else if (!feedback && (verb === 'codex' || verb === 'claude')) await reply('…');
+      else if (!feedback && !o.shared?.(room) && (verb === 'codex' || verb === 'claude')) await reply('…');
       const attachments: IncomingAttachment[] = [];
       for (const input of batch.length ? batch : [event]) attachments.push(...await this.receive(room, input, current));
       const initialPrompt = batch.length > 1 ? 'Queued messages from the same human in this conversation, in order:\n'
@@ -354,8 +357,11 @@ export class Bridge {
           if (!o.sendAttachments) throw new PublicError('Attachment sending is not configured.');
           await o.sendAttachments(room, responseEvent, files, controller.signal);
         };
-        // A peer-started turn may decline to answer; nothing is sent then.
-        if (!responseEvent.content?.[AGENT_TRIGGER] || files.length || (text.trim() && text.trim() !== 'NO_REPLY')) {
+        // A peer-started turn, or any turn in a shared room, may decline to
+        // answer; nothing is sent then. Commands always report their result.
+        const declined = !files.length && (responseEvent.content?.[AGENT_TRIGGER] ? !text.trim() || text.trim() === 'NO_REPLY'
+          : !command && !!o.shared?.(room) && text.trim() === 'NO_REPLY');
+        if (!declined) {
           // A mention wakes the peer, so it goes out only after everything else.
           if (mentions) await sendFiles();
           const respond = (body: string) => o.reply(room, responseEvent, body, !command, command ? 'm.notice' : 'm.text', mentions);

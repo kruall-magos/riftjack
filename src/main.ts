@@ -257,6 +257,7 @@ async function main() {
         send: (room, content) => client.sendMessage(room, content),
       })(request, signal) : undefined,
       mentions: linkedAgent ? (room, text) => links.mentions(account.userId, room, text) : undefined,
+      shared: linkedAgent ? room => !!links.room(account.userId, room) : undefined,
       publish: (account.kind === 'codex' || account.kind === 'claude') && botConfig.sandbox !== 'read-only'
         ? (input, signal, interact, authorize) => requestPublish(input, botConfig.workspace, botConfig.dataDir, botConfig.maxMediaBytes, signal, interact, authorize) : undefined,
       background: background ? async (input, { room, event, key }, signal) => {
