@@ -253,7 +253,9 @@ export class ConversationLinks {
         if (budget < 512) break;
         const part = entry.body.slice(start, start + budget - 400);
         const continues = start + part.length < entry.body.length;
-        unread.push({ ...entry, room: r.room, body: part, offset: start, continues });
+        // The reply ID is internal grouping, not conversation content.
+        const { reply: _reply, ...visible } = entry;
+        unread.push({ ...visible, room: r.room, body: part, offset: start, continues });
         budget -= part.length + 400;
         cursor = continues ? { seq: entry.seq, offset: start + part.length } : { seq: entry.seq + 1, offset: 0 };
         if (continues) break;

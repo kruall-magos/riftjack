@@ -486,6 +486,9 @@ test('mentions trigger once per recipient in any delivery order and carry the wh
   f.links.acknowledge(bot);
   const next = JSON.parse(f.links.prompt(bot, group, message('Next', '$h2'), 'Next').split('\n')[1]);
   assert.ok(!next.unreadSharedMessages.some((m: { id: string }) => m.id === '$part1' || m.id === '$part2'));
+  // Reply IDs group parts internally and are not shown to agents.
+  assert.ok(next.unreadSharedMessages.length > 0);
+  assert.ok(next.unreadSharedMessages.every((m: object) => !('reply' in m)));
   // An oversized reply from another installation is quoted partially and stays unread in full.
   const g = pair(t);
   g.links.observe(bot, group, message('Task', '$h1'));
