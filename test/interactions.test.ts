@@ -17,6 +17,8 @@ test('reactions select exact requests, reject unsupported emoji and cannot repla
     assert.deepEqual(controls.keys, ['❌']); controls.bind('$b');
   });
   assert.equal(pending.react('$a', '👍'), undefined);
+  assert.equal(pending.react('$a', '🔖'), undefined);
+  assert.equal(pending.react('$b', '🔖'), undefined);
   assert.equal(pending.react('$unknown', '✅'), undefined);
   assert.match(pending.react('$b', '✅')!, /needs !answer/);
   assert.equal(pending.size, 2);
@@ -194,7 +196,7 @@ test('remembering a command requires the owner, a valid proposal and an availabl
 
 test('remember is explicit, bound to a fully delivered confirmation, and never selected by approval reactions', async () => {
   const prefix = ['npm', 'run', 'test:http'];
-  for (const choice of ['remember', 'approve', 'reaction', 'deny']) {
+  for (const choice of ['remember', 'bookmark', 'bookmark-variation', 'approve', 'reaction', 'deny']) {
     const pending = new Interactions();
     const request = codexInteraction({ id: 1, method: 'item/commandExecution/requestApproval',
       params: { command: 'npm run test:http', proposedExecpolicyAmendment: prefix } }, undefined, true)!;
@@ -202,19 +204,21 @@ test('remember is explicit, bound to a fully delivered confirmation, and never s
       assert.match(pending.answer('!answer remember'), /still being delivered/);
       assert.match(text, /Approve and remember: !answer [a-f0-9]{12} remember/);
       assert.match(markdown, /Approve and remember: `\s*!answer [a-f0-9]{12} remember\s*`/);
-      assert.deepEqual(controls.keys, ['✅', '❌']);
+      assert.deepEqual(controls.keys, ['✅', '❌', '🔖']);
       controls.bind('$confirmation');
     });
     await Promise.resolve();
     assert.match(pending.answer('!answer yes'), /listed answer/);
     assert.equal(pending.size, 1);
     if (choice === 'remember') pending.answer('!answer remember');
+    else if (choice.startsWith('bookmark')) pending.react('$confirmation', choice === 'bookmark' ? '🔖' : '🔖\uFE0F');
     else if (choice === 'reaction') pending.react('$confirmation', '✅');
     else pending.answer('!' + choice);
-    assert.deepEqual(await result, choice === 'remember'
+    assert.deepEqual(await result, choice === 'remember' || choice.startsWith('bookmark')
       ? { decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: prefix } } }
       : { decision: choice === 'deny' ? 'decline' : 'accept' });
     assert.match(pending.answer('!answer remember'), /No pending/);
+    assert.equal(pending.react('$confirmation', '🔖'), undefined);
   }
 });
 
@@ -222,6 +226,25 @@ test('permission grants are limited to the requested fields and current turn; de
   const permissions = ask('item/permissions/requestApproval', { cwd: '/workspace', permissions: { network: { enabled: true }, fileSystem: null } });
   assert.deepEqual(permissions.approve, { permissions: { network: { enabled: true } }, scope: 'turn' });
   assert.deepEqual(permissions.deny, { permissions: {}, scope: 'turn' });
+});
+
+test('bookmark reactions select their own prefix among parallel confirmations and expire on cancellation', async () => {
+  const pending = new Interactions();
+  const start = (prefix: string[], event: string, taskSignal = signal()) => pending.ask(codexInteraction({
+    id: event, method: 'item/commandExecution/requestApproval',
+    params: { command: prefix.join(' '), proposedExecpolicyAmendment: prefix },
+  }, undefined, true)!, taskSignal, async (_text, controls) => controls.bind(event));
+  const first = start(['npm', 'run', 'test:http'], '$first');
+  const controller = new AbortController();
+  const second = start(['git', 'fetch'], '$second', controller.signal);
+  await Promise.resolve();
+  assert.match(pending.answer('!answer remember'), /More than one/);
+  pending.react('$first', '🔖');
+  assert.deepEqual(await first, { decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: ['npm', 'run', 'test:http'] } } });
+  assert.equal(pending.size, 1);
+  const rejected = assert.rejects(second);
+  controller.abort(); await rejected;
+  assert.equal(pending.react('$second', '🔖'), undefined);
 });
 
 test('questions require explicit answers and secret questions cannot collect credentials', () => {

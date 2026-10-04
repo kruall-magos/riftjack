@@ -12,6 +12,7 @@ export type Interaction = {
   answer?: (text: string) => object;
   answerHint?: string;
   answerLabel?: string;
+  answerReaction?: { key: string; answer: string };
 };
 export type Interact = (request: Interaction, signal: AbortSignal) => Promise<object>;
 // bind certifies full text delivery and binds controls to its final message.
@@ -38,6 +39,7 @@ export class Interactions {
     const prompt = confirmationPrompt(id, request);
     try {
       const keys = request.approve !== undefined ? ['✅', '❌'] : ['❌'];
+      if (request.answer && request.answerReaction) keys.push(request.answerReaction.key);
       await send(prompt.text, {
         keys,
         bind: eventId => { const pending = this.pending.get(id); if (pending) { pending.eventId = eventId; pending.delivered = true; } },
@@ -55,9 +57,13 @@ export class Interactions {
 
   react(eventId: string, key: string): string | undefined {
     const verb = key === '✅' || key === '✅\uFE0F' ? 'approve' : key === '❌' || key === '❌\uFE0F' ? 'deny' : undefined;
-    if (!verb) return;
     const entry = [...this.pending.entries()].find(([, pending]) => pending.eventId === eventId);
-    return entry ? this.answer(`!${verb} ${entry[0]}`) : undefined;
+    if (!entry) return;
+    if (verb) return this.answer(`!${verb} ${entry[0]}`);
+    const reaction = entry[1].request.answerReaction;
+    if (reaction && (key === reaction.key || key === reaction.key + '\uFE0F')) {
+      return this.answer(`!answer ${entry[0]} ${reaction.answer}`);
+    }
   }
 
   answer(text: string): string {

@@ -525,18 +525,29 @@ for (const verb of ['approve', 'deny']) for (const withId of [true, false, 'reac
   assert.deepEqual(f.errors, []);
 });
 
-test('Matrix remember sends the exact persistent decision once without steering or accepting foreign answers', async t => {
+for (const bookmark of [false, true]) test(`Matrix remember ${bookmark ? 'reaction' : 'command'} sends the exact persistent decision once without steering or accepting foreign answers`, async t => {
   const f = confirming(t);
   const task = f.bridge.handle('!dm:test', f.event('[confirm] [remember]'));
   await until(() => f.confirmations().length === 1);
   const text = `!answer ${f.id()} remember`;
+  const reaction = () => ({ ...f.event(''), type: 'm.reaction', content: {
+    'm.relates_to': { rel_type: 'm.annotation', event_id: f.reactionTarget(), key: '🔖' },
+  } });
+  await f.bridge.handle('!other:test', reaction());
+  await f.bridge.handle('!dm:test', { ...reaction(), sender: '@stranger:test' });
+  await f.bridge.handle('!dm:test', { ...reaction(), content: {
+    'm.relates_to': { rel_type: 'm.annotation', event_id: '$unrelated', key: '🔖' },
+  } });
   await f.bridge.handle('!other:test', f.event(text));
   await f.bridge.handle('!dm:test', { ...f.event(text), sender: '@stranger:test' });
   await f.bridge.handle('!dm:test', { ...f.event(text), content: { msgtype: 'm.text', body: text,
     'm.relates_to': { rel_type: 'm.thread', event_id: '$other-thread' } } });
   assert.equal(f.calls().some(c => c.id === 'approval-A'), false);
-  await f.bridge.handle('!dm:test', f.event(text));
+  const answer = bookmark ? reaction() : f.event(text);
+  await f.bridge.handle('!dm:test', answer);
   await task;
+  await f.bridge.handle('!dm:test', answer);
+  await f.bridge.handle('!dm:test', reaction());
   await f.bridge.handle('!dm:test', f.event(text));
   assert.deepEqual(f.calls().filter(c => c.id === 'approval-A').map(c => c.result), [
     { decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: ['echo', 'approved'] } } },

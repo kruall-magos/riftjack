@@ -417,7 +417,7 @@ export class Bridge {
     }
     if (this.stopped || o.isStopping?.() || !current || current.failed || current.room !== room || current.sender !== event.sender ||
       !event.event_id || !Number.isFinite(event.origin_server_ts) || event.origin_server_ts! < o.since ||
-      relation?.rel_type !== 'm.annotation' || !relation.event_id || !['✅', '❌', '✅\uFE0F', '❌\uFE0F'].includes(relation.key || '') ||
+      relation?.rel_type !== 'm.annotation' || !relation.event_id || !['✅', '❌', '🔖', '✅\uFE0F', '❌\uFE0F', '🔖\uFE0F'].includes(relation.key || '') ||
       !current.interactions.hasReactionTarget(relation.event_id)) return;
     // Reactions carry the confirmation event ID, not a thread relation. The
     // exact bound message supplies the room/thread scope; never guess a request.

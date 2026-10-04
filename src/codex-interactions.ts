@@ -53,7 +53,8 @@ export function codexInteraction(request: ServerRequest, item?: Record<string, a
         ] : [{ value: 'This request only; no permanent rule.' }]),
       ]),
       approve: canApprove ? { decision: 'accept' } : undefined, deny,
-      ...(canRemember && { answerLabel: 'Approve and remember', answerHint: 'remember', answer: (text: string) => {
+      ...(canRemember && { answerLabel: '🔖 Approve and remember', answerHint: 'remember',
+        answerReaction: { key: '🔖', answer: 'remember' }, answer: (text: string) => {
         if (text !== 'remember') throw new PublicError('Use the listed answer "remember" to approve and save exactly the displayed prefix, or approve once / decline.');
         return { decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: [...amendment] } } };
       } }) };
