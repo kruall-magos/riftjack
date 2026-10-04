@@ -97,10 +97,13 @@ export class ConversationLinks {
     delete saved[CREDITS_KEY];
     this.history = saved;
   }
-  // A newly accepted human message to this agent restores its peer credit to the cap.
+  // A newly accepted human message to this agent restores its peer credit to the
+  // cap and starts a new generation: its unused grants are voided, so reserve
+  // plus pending mentions never exceed the cap.
   credit(bot: string, now = Date.now()): void {
     if (!this.agent(bot)) return;
     this.credits.agents[bot] = { level: PEER_CREDIT, since: now };
+    this.credits.grants = Object.fromEntries(Object.entries(this.credits.grants).filter(([, grant]) => grant.from !== bot));
     this.saveHistory();
   }
   peerCredit(bot: string, now = Date.now()): number {

@@ -413,13 +413,18 @@ test('peer credit is restored, never accumulated, and every exchange without the
   const refused = links.mentions(peer, group, 'Hi\n\n```matrix-mentions\n{"to":["' + bot + '"]}\n```')!;
   assert.deepEqual(refused.mentions, []);
   assert.match(refused.error!, /no peer credit/);
-  // A grant is consumed once and cannot be spent again after new human messages.
+  // A grant is consumed once.
   links.credit(peer);
-  const early = paid(links, 'Early', '$early', peer, [bot]);
-  links.credit(peer);
-  assert.ok(links.mention(bot, group, early));
-  assert.equal(links.mention(bot, group, { ...early, event_id: '$early-copy' }), undefined);
-  assert.equal(links.peerCredit(peer), PEER_CREDIT);
+  const once = paid(links, 'Once', '$once', peer, [bot]);
+  assert.ok(links.mention(bot, group, once));
+  assert.equal(links.mention(bot, group, { ...once, event_id: '$once-copy' }), undefined);
+  // A new human message voids unused grants: pending mentions never exceed the cap.
+  const pending: MatrixEvent[] = [];
+  for (let round = 0; round < 5; round++) {
+    links.credit(peer);
+    for (let n = 0; n < PEER_CREDIT; n++) pending.push(paid(links, 'Queued', `$queued-${round}-${n}`, peer, [bot]));
+  }
+  assert.equal(pending.filter(event => links.mention(bot, group, event)).length, PEER_CREDIT);
 });
 
 test('mention blocks are validated, removed and reported back to the agent', t => {
