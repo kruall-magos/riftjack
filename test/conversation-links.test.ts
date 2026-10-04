@@ -427,6 +427,24 @@ test('peer credit is restored, never accumulated, and every exchange without the
   assert.equal(pending.filter(event => links.mention(bot, group, event)).length, PEER_CREDIT);
 });
 
+test('credit passed to the peer never adds to the peer\'s own pending mentions', t => {
+  const f = pair(t), links = f.links;
+  links.observe(bot, group, message('Task', '$h1'));
+  const replies: MatrixEvent[] = [];
+  // The human writes only to the reviewer; each time it starts the builder,
+  // which prepares replies that are delivered only later.
+  for (let round = 0; round < 5; round++) {
+    links.credit(peer);
+    assert.ok(links.mention(bot, group, paid(links, 'Start', `$start-${round}`, peer, [bot])));
+    for (let n = 0; n < PEER_CREDIT; n++) {
+      const reply = paid(links, 'Reply', `$reply-${round}-${n}`, bot, [peer]);
+      if (reply.content![GRANT]) replies.push(reply);
+    }
+  }
+  // The builder's reserve and pending replies never exceeded what it was passed.
+  assert.ok(replies.filter(event => links.mention(peer, group, event)).length <= PEER_CREDIT - 1);
+});
+
 test('mention blocks are validated, removed and reported back to the agent', t => {
   const f = pair(t), links = f.links;
   links.observe(bot, group, message('Task', '$h1'));

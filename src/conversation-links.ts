@@ -185,7 +185,10 @@ export class ConversationLinks {
     const allowed = !!grant && grant.from === event.sender && grant.to === bot && grant.room === room && now - grant.since < CREDIT_TTL_MS;
     if (grant && allowed) {
       delete this.credits.grants[id as string];
-      if (grant.level > this.peerCredit(bot, now)) this.credits.agents[bot] = { level: grant.level, since: grant.since };
+      // The recipient's reserve plus its own pending grants becomes the larger of
+      // that total and the passed level, never more: it stays within the cap.
+      const pending = Object.values(this.credits.grants).filter(g => g.from === bot && now - g.since < CREDIT_TTL_MS).length;
+      if (grant.level - pending > this.peerCredit(bot, now)) this.credits.agents[bot] = { level: grant.level - pending, since: grant.since };
     }
     this.saveHistory();
     if (!allowed) return;

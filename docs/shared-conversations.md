@@ -156,8 +156,9 @@ A received mention starts a separate turn for the mentioned agent:
   mentioning message is prepared, and the message carries a one-time grant; its
   recipient is started only by an unused grant addressed to it, so mentions sent
   ahead cannot spend credit restored later. Restoring the reserve voids the
-  agent's unused grants, so its reserve and pending mentions together never exceed
-  the cap. Silent or failed turns count as well.
+  agent's unused grants, and credit passed by the peer raises the reserve only
+  so far that reserve plus pending mentions equals the passed level; together they
+  never exceed the cap. Silent or failed turns count as well.
   The agent sees its reserve as `peerCredit` in the routing context. A mention
   without credit is refused with an error to the sender. Only agents of this
   installation have credit.
