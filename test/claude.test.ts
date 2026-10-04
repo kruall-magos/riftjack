@@ -14,7 +14,7 @@ import type { BackendReply } from '../src/media.js';
 import { configForWorkspace } from '../src/workspace.js';
 import { approvalInstructions } from '../src/approval-instructions.js';
 
-function setup(t: { after(fn: () => void): void }, options: { auth?: string; malformed?: boolean; legacy?: boolean } = {}) {
+function setup(t: { after(fn: () => void): void }, options: { auth?: string; malformed?: boolean; legacy?: boolean; replay?: boolean } = {}) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'matrix-claude-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const executable = join(dir, 'claude.cjs');
@@ -25,7 +25,7 @@ const args = process.argv.slice(2);
 const record = value => fs.appendFileSync(__filename + '.calls', JSON.stringify(value) + '\\n');
 record({ args, cwd: process.cwd(), user: process.env.USER, logname: process.env.LOGNAME, secrets: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'AWS_ACCESS_KEY_ID', 'SYNAPSE_ADMIN_TOKEN', 'MATRIX_OWNER_ID', 'ANTHROPIC_BASE_URL', 'CLAUDECODE'].filter(key => process.env[key]) });
 if (args.includes('--help')) {
-  console.log(${JSON.stringify(options.legacy ? '--help' : '--input-format --output-format --permission-mode --permission-prompt-tool --append-system-prompt --tools --settings --resume')}); process.exit(0);
+  console.log(${JSON.stringify(options.legacy ? '--help' : '--input-format --output-format --permission-mode --permission-prompt-tool --append-system-prompt --tools --settings --resume' + (options.replay ? ' --replay-user-messages' : ''))}); process.exit(0);
 }
 if (args[0] === 'auth') {
   console.log(${JSON.stringify(options.malformed ? 'not json' : JSON.stringify({ loggedIn: options.auth !== 'none', authMethod: options.auth || 'claude.ai', apiProvider: 'firstParty' }))}); process.exit(0);
@@ -39,9 +39,11 @@ const lock = path.join(__dirname, 'active.lock');
 fs.closeSync(fs.openSync(lock, 'wx'));
 process.on('exit', () => fs.unlinkSync(lock));
 const output = value => console.log(JSON.stringify(value));
-let started = false, onResponse;
+let started = false, onResponse, onUpdate;
+const echo = update => output({ type: 'user', uuid: update.uuid, isReplay: true, message: update.message, session_id: 'claude-session-1' });
 require('node:readline').createInterface({ input: process.stdin }).on('line', line => {
   const message = JSON.parse(line);
+  if (started && message.type === 'user') { record({ update: message }); onUpdate?.(message); return; }
   if (started) { record({ response: message }); onResponse?.(message); return; }
   started = true; record({ input: message });
   const prompt = message.message.content[0].text;
@@ -62,6 +64,19 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
     onResponse = response => finish('Unknown ' + response.response.subtype);
     return;
   }
+  // Live updates: echoed while working, echoed only after an early result, or never echoed.
+  const updateText = update => update.message.content[0].text;
+  if (prompt.includes('[steer]')) {
+    output({ type: 'system', subtype: 'task_started' }); record({ waitingUpdate: true });
+    onUpdate = update => { echo(update); finish('Claude answer with ' + updateText(update)); };
+    return;
+  }
+  if (prompt.includes('[late]')) {
+    record({ waitingUpdate: true });
+    onUpdate = update => { finish('First answer'); setTimeout(() => { echo(update); finish('Second answer to ' + updateText(update)); }, 50); };
+    return;
+  }
+  if (prompt.includes('[noecho]')) { record({ waitingUpdate: true }); onUpdate = () => finish('Answer without echo'); return; }
   if (prompt.includes('[bad-json]')) { console.log('invalid JSON'); return; }
   if (prompt.includes('[wait]')) { record({ waiting: true }); setInterval(() => {}, 1000); return; }
   if (prompt.includes('[approval]')) { output({ type: 'control_request', request: { subtype: 'can_use_tool' } }); setInterval(() => {}, 1000); return; }
@@ -380,6 +395,39 @@ test('Claude cancellation waits for the process to exit and releases its convers
   abort.abort(); await stopped;
   assert.ok(f.calls().some(call => call.stopped));
   assert.equal(await f.backend('claude', 'retry', 'key', signal(), '@owner:test'), 'Claude answer');
+});
+
+test('Claude steering writes an update into the running turn and confirms it by its echoed UUID', async t => {
+  const f = setup(t, { replay: true });
+  const task = f.backend('claude', '[steer]', 'key', signal(), '@owner:test');
+  await until(() => f.calls().some(call => call.waitingUpdate));
+  // A task_started event or a tool result is not a confirmation; only the echo is.
+  assert.equal(await f.backend.steer('make it blue', 'key', signal(), '@owner:test'), true);
+  assert.equal(await task, 'Claude answer with make it blue');
+  const run = f.calls().find(call => call.args?.includes('--print'));
+  assert.ok(run.args.includes('--replay-user-messages'));
+  const update = f.calls().find(call => call.update).update;
+  assert.equal(typeof update.uuid, 'string');
+  assert.equal(update.message.content[0].text, 'make it blue');
+  // No running turn: steering falls back to a follow-up.
+  assert.equal(await f.backend.steer('later', 'key', signal(), '@owner:test'), false);
+});
+
+test('an update echoed after an early result adds the next answer to the same task', async t => {
+  const f = setup(t, { replay: true });
+  const task = f.backend('claude', '[late]', 'key', signal(), '@owner:test');
+  await until(() => f.calls().some(call => call.waitingUpdate));
+  assert.equal(await f.backend.steer('one more thing', 'key', signal(), '@owner:test'), true);
+  assert.equal(await task, 'First answer\n\nSecond answer to one more thing');
+});
+
+test('an update without an echo is reported as unconfirmed, never resent', async t => {
+  const f = setup(t, { replay: true });
+  const task = f.backend('claude', '[noecho]', 'key', signal(), '@owner:test');
+  await until(() => f.calls().some(call => call.waitingUpdate));
+  await assert.rejects(f.backend.steer('maybe lost', 'key', signal(), '@owner:test'), /before confirming/);
+  assert.equal(await task, 'Answer without echo');
+  assert.equal(f.calls().filter(call => call.update).length, 1);
 });
 
 test('routing runs Claude alongside a running Codex task and isolates steering', async () => {
