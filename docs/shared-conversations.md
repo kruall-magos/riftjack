@@ -103,9 +103,12 @@ A received mention starts a separate turn for the mentioned agent:
   merged with queued human messages.
 - The prompt marks the turn as started by the peer. The turn is a connector
   notice in the human's approval scope, so confirmations still go to the human.
-  It quotes every part of the mentioning reply (up to 8,000 characters), so the
-  question arrives even behind a long unread backlog; those parts are not
-  delivered again as observations. Matrix events cannot claim to be such a
+  It quotes every part of the mentioning reply, so the question arrives even
+  behind a long unread backlog; those parts are not delivered again as
+  observations. A reply that mentions a peer may have at most 6,000 characters;
+  a longer one is sent without the mention and reported as an invalid block. A
+  quote over 8,000 characters from another installation is shortened, and its
+  parts remain unread observations. Matrix events cannot claim to be such a
   notice.
 - Each agent evaluates a peer message once, regardless of which bot received
   it from Matrix first.

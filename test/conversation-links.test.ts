@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { ConversationLinks, isSharedRoomState, mentionText } from '../src/conversation-links.js';
+import { ConversationLinks, isSharedRoomState, MENTION_REPLY_LIMIT, mentionText } from '../src/conversation-links.js';
 import { replyContent } from '../src/message-format.js';
 import { State } from '../src/state.js';
 import { AGENT_TRIGGER, Bridge, ORIGIN, REPLY, SERVICE, sessionKey, type MatrixEvent } from '../src/bridge.js';
@@ -315,6 +315,15 @@ test('mention blocks are validated, removed and reported back to the agent', t =
   for (const nested of ['> ' + block(`{"to":["${peer}"]}`).replace(/\n/g, '\n> '), '- item\n\n  ```matrix-mentions\n  {"to":["' + peer + '"]}\n  ```']) {
     assert.deepEqual(links.mentions(bot, group, nested)!.mentions, []);
   }
+  // The real block is removed by position, even after an identical example.
+  const real = '```matrix-mentions\n{"to":["' + peer + '"]}\n```';
+  const withExample = links.mentions(bot, group, '````markdown\n' + real + '\n````\n\nDone.\n\n' + real)!;
+  assert.deepEqual(withExample.mentions, [peer]);
+  assert.equal(withExample.text, '````markdown\n' + real + '\n````\n\nDone.');
+  // A mentioning reply must fit into the quote its notice carries.
+  const tooLong = links.mentions(bot, group, 'x'.repeat(MENTION_REPLY_LIMIT + 1) + '\n\n' + real)!;
+  assert.deepEqual(tooLong.mentions, []);
+  assert.match(tooLong.error!, /at most/);
   assert.equal(links.mentions(bot, home, block(`{"to":["${peer}"]}`)), undefined);
   for (const bad of [block(`{"to":["${human}"]}`), block(`{"to":["${bot}"]}`), block('{"to":'), block('{"to":[]}'),
     block(`{"to":["${peer}"]}`) + '\n' + block(`{"to":["${peer}"]}`)]) {
@@ -442,4 +451,14 @@ test('mentions trigger once per recipient in any delivery order and carry the wh
   f.links.acknowledge(bot);
   const next = JSON.parse(f.links.prompt(bot, group, message('Next', '$h2'), 'Next').split('\n')[1]);
   assert.ok(!next.unreadSharedMessages.some((m: { id: string }) => m.id === '$part1' || m.id === '$part2'));
+  // An oversized reply from another installation is quoted partially and stays unread in full.
+  const g = pair(t);
+  g.links.observe(bot, group, message('Task', '$h1'));
+  g.links.observe(bot, group, part('IMPORTANT-FIRST-PART' + 'y'.repeat(9000), '$big1', 'r2'));
+  const tail = mentioning('Short question?', '$big2', peer, [bot], '$h1');
+  Object.assign(tail.content!, { [REPLY]: 'r2' });
+  g.links.observe(bot, group, tail);
+  const partial = g.links.mention(bot, group, tail)!;
+  assert.deepEqual(partial.content![AGENT_TRIGGER]!.events, []);
+  assert.match(g.links.prompt(bot, group, partial, partial.content!.body!), /IMPORTANT-FIRST-PART[^]*"truncated":true/);
 });
