@@ -413,6 +413,16 @@ async function main() {
         await background.pump({
           valid: target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude'] === target.session,
           deliver: (target, event, admitted) => codingBridge.resumeBackground(target.room, event, target.session, admitted),
+          // A room timer is the bot's own message: no turn, mentions or human origin.
+          post: async (target, text, admitted) => {
+            if (stopping || !(await privateRoom(target.room, target.sender))) return false;
+            admitted();
+            const relation = target.thread ? { 'm.relates_to': { rel_type: 'm.thread', event_id: target.thread } } : {};
+            for (const content of replyContent(text, true, true, 'm.text')) {
+              await client.sendMessage(target.room, { ...content, 'm.mentions': {}, ...relation });
+            }
+            return true;
+          },
           report: diagnostics,
         });
       });

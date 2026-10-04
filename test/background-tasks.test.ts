@@ -140,3 +140,48 @@ test('a user turn admitted during the privacy check defers the background turn',
   unblock(); assert.equal(await background, false);
   finish(); await user; assert.equal(turns, 1);
 });
+
+test('timers wait until due, survive restart and deliver once as a reminder or a room message', async t => {
+  const f = setup(t), posts: string[] = [], reminders: string[] = [];
+  const remind = (deliver: string, extra: object) => JSON.parse(f.queue.action({ action: 'remind', label: 'Check', message: 'Line one\nline two', deliver, ...extra }, target, signal()));
+  const room = remind('room', { delay_minutes: 5 });
+  const agent = remind('agent', { at: new Date(Date.now() + 10 * 60_000).toISOString() });
+  const options = { valid: () => true, report,
+    post: async (_t: BackgroundTarget, text: string, admit: () => void) => { admit(); posts.push(text); return true; },
+    deliver: async (destination: BackgroundTarget, message: MatrixEvent, admit: () => void) => {
+      admit(); reminders.push(message.content!.body!);
+      assert.equal(sessionKey(destination.room, message), target.key);
+      return true;
+    } };
+  const queue = new BackgroundTasks(f.file, f.root);
+  await queue.pump(options);
+  assert.deepEqual([posts.length, reminders.length], [0, 0]);
+  await queue.pump(options, Date.now() + 6 * 60_000);
+  assert.deepEqual(posts, ['Line one\nline two']);
+  assert.equal(reminders.length, 0);
+  await queue.pump(options, Date.now() + 11 * 60_000);
+  await new BackgroundTasks(f.file, f.root).pump(options, Date.now() + 12 * 60_000);
+  assert.equal(posts.length, 1); assert.equal(reminders.length, 1);
+  assert.match(reminders[0], /not a new human instruction[^]*"label":"Check"/);
+  const states = JSON.parse(queue.action({ action: 'list' }, target, signal()));
+  assert.deepEqual(states.map((s: { id: string; state: string }) => [s.id, s.state]), [[room.id, 'delivered'], [agent.id, 'delivered']]);
+  assert.match(queue.summary(target.key, target.session), /0 timers pending/);
+});
+
+test('timer input is bounded, cancellable, and an undeliverable timer is dropped rather than sent late', async t => {
+  const f = setup(t);
+  const base = { action: 'remind', label: 'Later', message: 'Hello', deliver: 'room' };
+  for (const bad of [{ ...base }, { ...base, delay_minutes: 0 }, { ...base, delay_minutes: 10081 }, { ...base, delay_minutes: 5, at: new Date().toISOString() },
+    { ...base, at: '2026-10-04 10:00' }, { ...base, at: new Date(Date.now() - 60_000).toISOString() }, { ...base, deliver: 'everyone', delay_minutes: 5 },
+    { ...base, message: '', delay_minutes: 5 }, { ...base, delay_minutes: 5, extra: true }]) {
+    assert.throws(() => f.queue.action(bad, target, signal()), /Use remind/);
+  }
+  const cancelled = JSON.parse(f.queue.action({ ...base, delay_minutes: 5 }, target, signal()));
+  assert.equal(JSON.parse(f.queue.action({ action: 'cancel', id: cancelled.id }, target, signal())).state, 'cancelled');
+  JSON.parse(f.queue.action({ ...base, delay_minutes: 5 }, target, signal()));
+  // A busy or private-room refusal keeps it pending; a day later it is dropped.
+  await f.queue.pump({ valid: () => true, report, deliver: async () => false, post: async () => false }, Date.now() + 6 * 60_000);
+  assert.match(f.queue.summary(target.key, target.session), /1 timers pending/);
+  await f.queue.pump({ valid: () => true, report, deliver: async () => false, post: async () => assert.fail('Late timer must not be sent') }, Date.now() + 25 * 3_600_000);
+  assert.match(f.queue.summary(target.key, target.session), /0 timers pending/);
+});

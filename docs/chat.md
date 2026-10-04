@@ -33,6 +33,22 @@ then register:
 {"action":"watch","label":"Example build","status_file":"build-status.json","field":"stage","terminal":["complete","failed"],"timeout_hours":24}
 ```
 
+The same tool schedules delayed messages for up to 7 days, for example when you
+ask a bot to remind you of something tomorrow:
+
+```json
+{"action":"remind","label":"Release check","message":"Check whether the release build finished.","deliver":"agent","delay_minutes":1440}
+```
+
+`deliver: "agent"` resumes the conversation when due, with the message as the
+bot's own reminder. `deliver: "room"` posts the message to the conversation as
+the bot without starting a turn; it does not mention anyone. Use `at` with an ISO
+8601 time and offset instead of `delay_minutes` for a fixed time. Timers survive
+restarts, are listed with `action: "list"`, and can be cancelled before they are
+due. A busy bot delivers an agent reminder after its current task. A timer that
+cannot be delivered within a day of its due time is dropped rather than sent late,
+and a crash during delivery is never replayed.
+
 Have the background process write a terminal state on both success and failure.
 Prefer writing a temporary file and renaming it over the status file. The selected
 field must be a top-level string; the JSON file must be a regular file of at most
