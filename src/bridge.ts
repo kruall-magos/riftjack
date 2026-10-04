@@ -17,12 +17,16 @@ import { feedbackMeaning, reactionFeedback, type ReactionReader } from './reacti
 // Connector-defined content fields. A trigger marks a turn started by a peer
 // agent's mention; it is created locally and never accepted from Matrix.
 // A reply ID is shared by the parts of one split reply.
-// A grant is the ID of the peer credit paid for a mention.
-export const AGENT_TRIGGER = 'riftjack.trigger', SERVICE = 'riftjack.service', REPLY = 'riftjack.reply', GRANT = 'riftjack.grant';
+// A grant is the ID of the peer credit paid for a mention. A notice marks a
+// locally created turn in the human's approval scope (a background result, a
+// timer or reaction feedback), so it is not presented as the human's words.
+export const AGENT_TRIGGER = 'riftjack.trigger', SERVICE = 'riftjack.service', REPLY = 'riftjack.reply', GRANT = 'riftjack.grant',
+  NOTICE = 'riftjack.notice';
+export type Notice = 'background' | 'timer' | 'reaction';
 export type MatrixEvent = {
   type?: string; event_id?: string; sender?: string; origin_server_ts?: number; room_id?: string;
   content?: MediaContent & { 'm.mentions'?: { user_ids?: string[] }; 'm.relates_to'?: { rel_type?: string; event_id?: string; key?: string; 'm.in_reply_to'?: { event_id: string } };
-    [AGENT_TRIGGER]?: { agent: string; event: string; events?: string[] }; [SERVICE]?: unknown; [REPLY]?: unknown; [GRANT]?: unknown };
+    [AGENT_TRIGGER]?: { agent: string; event: string; events?: string[] }; [SERVICE]?: unknown; [REPLY]?: unknown; [GRANT]?: unknown; [NOTICE]?: Notice };
 };
 export type Mentions = { text: string; mentions: string[]; error?: string };
 export type Mode = 'codex' | 'claude' | 'grok' | 'manager';
@@ -91,7 +95,8 @@ export class Bridge {
   revoke(sender: string) { if (this.active?.sender === sender) this.active.controller.abort(); }
   async handle(room: string, event: MatrixEvent): Promise<void> {
     const o = this.options;
-    if (!event.sender || !o.isAuthorized(event.sender) || event.sender === o.botId || event.content?.[AGENT_TRIGGER]) return;
+    // Locally created turns are never accepted from Matrix.
+    if (!event.sender || !o.isAuthorized(event.sender) || event.sender === o.botId || event.content?.[AGENT_TRIGGER] || event.content?.[NOTICE]) return;
     if (event.type === 'm.reaction') { await this.handleReaction(room, event); return; }
     await this.handleMessage(room, event);
   }

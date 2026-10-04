@@ -1,4 +1,4 @@
-import type { MatrixEvent } from './bridge.js';
+import { NOTICE, type MatrixEvent } from './bridge.js';
 
 export type ReactionReader = (room: string, eventId: string) => Promise<MatrixEvent | undefined>;
 
@@ -34,7 +34,7 @@ export async function reactionFeedback(room: string, event: MatrixEvent, options
   if (thread?.rel_type === 'm.thread' && (typeof thread.event_id !== 'string' || !thread.event_id)) return;
   if (!(await allowed())) return;
   return { type: 'm.room.message', event_id: event.event_id, sender: event.sender, origin_server_ts: event.origin_server_ts,
-    content: { msgtype: 'm.text', body: 'The conversation partner reacted to an earlier message from this bot. Interpret the reaction in the context of that message and the ongoing conversation. '
+    content: { msgtype: 'm.text', [NOTICE]: 'reaction', body: 'The conversation partner reacted to an earlier message from this bot. Interpret the reaction in the context of that message and the ongoing conversation. '
       + 'A thumbs-up usually expresses agreement or approval; a heart expresses strong appreciation or support. On a concrete proposed next step within the agreed work, either can mean "yes, go ahead"; continue the agreed work instead of only acknowledging the reaction. '
       + 'A reaction to a completed result or a personal remark may simply express appreciation; do not invent a new task from it. '
       + 'Reactions do not answer pending confirmation requests or replace required approvals, including publication approval. The quoted message below is context for the reaction.\n'

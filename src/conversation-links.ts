@@ -3,7 +3,7 @@ import { Marked, type Token, type Tokens } from 'marked';
 import type { Account } from './accounts.js';
 import { PublicError } from './errors.js';
 import { randomUUID } from 'node:crypto';
-import { AGENT_TRIGGER, GRANT, REPLY, SERVICE, type MatrixEvent, type Mentions } from './bridge.js';
+import { AGENT_TRIGGER, GRANT, NOTICE, REPLY, SERVICE, type MatrixEvent, type Mentions } from './bridge.js';
 import type { State } from './state.js';
 import { isPrivateRoomState } from './private-room.js';
 
@@ -269,7 +269,7 @@ export class ConversationLinks {
     return !Array.isArray(mentions) || mentions.length === 0 || mentions.includes(bot);
   }
   prompt(bot: string, room: string, event: MatrixEvent, prompt: string, steering = false): string {
-    const a = this.agent(bot)!, trigger = event.content?.[AGENT_TRIGGER];
+    const a = this.agent(bot)!, trigger = event.content?.[AGENT_TRIGGER], notice = event.content?.[NOTICE];
     const shared = this.room(bot, room);
     const rooms = steering ? [] : shared ? [shared] : this.config.rooms.filter(r => r.bots.includes(bot));
     const unread: (Entry & { room: string; offset: number; continues: boolean })[] = [];
@@ -316,9 +316,11 @@ export class ConversationLinks {
         + 'containing JSON like {"to":["@agent:example.com"]}. The connector removes it and sends a Matrix mention after the reply. '
         + `Such a reply may have at most ${MENTION_REPLY_LIMIT} characters. Names and links do not start a turn. Each mention costs one of your peer credits (peerCredit below, at most ${PEER_CREDIT}); `
         + 'a human message to you restores them, and the mentioned agent receives your remainder. Use a mention only when a response is needed.' : '')
-      + '\n' + JSON.stringify({ room, visibility: shared ? 'shared' : 'private', human: a.owner, author: trigger?.agent ?? event.sender,
-        trigger: trigger ? 'agent-mention' : 'human-message', participants: shared ? [shared.owner, ...shared.bots] : [a.owner, bot],
+      // A background result or timer is written by the connector; reaction feedback describes the human's reaction.
+      + '\n' + JSON.stringify({ room, visibility: shared ? 'shared' : 'private', human: a.owner,
+        author: trigger?.agent ?? (notice && notice !== 'reaction' ? 'connector' : event.sender),
+        trigger: trigger ? 'agent-mention' : notice ?? 'human-message', participants: shared ? [shared.owner, ...shared.bots] : [a.owner, bot],
         unreadSharedMessages: unread, remainingMessages, ...(shared && { peerCredit: this.peerCredit(bot) }), ...(connectorNotes.length && { connectorNotes }) })
-      + (trigger ? '\nCurrent connector notice:\n' : '\nCurrent human message:\n') + prompt;
+      + (trigger || notice ? '\nCurrent connector notice:\n' : '\nCurrent human message:\n') + prompt;
   }
 }

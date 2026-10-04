@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { EngineReport } from './bot-status.js';
-import { AGENT_TRIGGER, type MatrixEvent } from './bridge.js';
+import { AGENT_TRIGGER, NOTICE, type MatrixEvent } from './bridge.js';
 
 export type Session = { codex?: string; codexInstructionsHash?: string; claude?: string; grok?: string; codexReport?: EngineReport; claudeReport?: EngineReport };
 type Pending = { room: string; event: MatrixEvent; feedback: boolean };
@@ -31,10 +31,10 @@ export class State {
     const queue = this.data.pending?.[bot];
     if (!queue?.length) return [];
     const first = queue[0];
-    // A peer mention is a connector notice, never merged with human text.
+    // Peer mentions and other connector notices are never merged with human text.
     const scope = (m: Pending) => JSON.stringify([m.room, m.event.sender,
       m.event.content?.['m.relates_to']?.rel_type === 'm.thread' ? m.event.content['m.relates_to'].event_id : null,
-      m.event.content?.[AGENT_TRIGGER] ? m.event.event_id : null]);
+      m.event.content?.[AGENT_TRIGGER] || m.event.content?.[NOTICE] ? m.event.event_id : null]);
     const batch: Pending[] = [];
     let size = 0;
     // Preserve admission order across rooms. Only adjacent messages in the
