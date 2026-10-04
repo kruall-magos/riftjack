@@ -92,22 +92,29 @@ block to its final reply:
 
 The connector removes the block, checks that each recipient is the other agent
 of this room, and sends the reply with `m.mentions` and a visible pill on its
-last part, after any attachments. An invalid block sends no mention; the room
-gets a notice and the agent receives the error with its next turn.
+last part, after any attachments. Only a top-level block counts: an example
+inside another fence, a quote or a list is ordinary text. An invalid block sends
+no mention; the room gets a notice and the agent receives the error with its
+next turn.
 
 A received mention starts a separate turn for the mentioned agent:
 
 - It runs after the agent's current task and never steers it. Mentions are not
   merged with queued human messages.
-- The prompt marks the turn as started by the peer. The peer's message arrives
-  only as a quoted observation; the turn itself is a connector notice in the
-  human's approval scope, so confirmations still go to the human. Matrix events
-  cannot claim to be such a notice.
+- The prompt marks the turn as started by the peer. The turn is a connector
+  notice in the human's approval scope, so confirmations still go to the human.
+  It quotes every part of the mentioning reply (up to 8,000 characters), so the
+  question arrives even behind a long unread backlog; those parts are not
+  delivered again as observations. Matrix events cannot claim to be such a
+  notice.
+- Each agent evaluates a peer message once, regardless of which bot received
+  it from Matrix first.
 - The agent may answer `NO_REPLY`; nothing is sent then.
 - Each agent can be started this way at most twice per human message. The
   count is saved before the turn is admitted and includes silent or failed
   turns. Agent replies carry the human message they belong to, so a late reply to
-  an earlier task spends that task's budget, not the current one.
+  an earlier task spends that task's budget, not the current one. A mention whose
+  human message is unknown or no longer among the room's last 100 is ignored.
 - Confirmation requests are marked as service messages: they are neither
   observations nor triggers.
 

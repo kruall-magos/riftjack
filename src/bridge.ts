@@ -14,11 +14,12 @@ import { feedbackMeaning, reactionFeedback, type ReactionReader } from './reacti
 
 // Connector-defined content fields. A trigger marks a turn started by a peer
 // agent's mention; it is created locally and never accepted from Matrix.
-export const AGENT_TRIGGER = 'riftjack.trigger', ORIGIN = 'riftjack.origin', SERVICE = 'riftjack.service';
+// A reply ID is shared by the parts of one split reply.
+export const AGENT_TRIGGER = 'riftjack.trigger', ORIGIN = 'riftjack.origin', SERVICE = 'riftjack.service', REPLY = 'riftjack.reply';
 export type MatrixEvent = {
   type?: string; event_id?: string; sender?: string; origin_server_ts?: number; room_id?: string;
   content?: MediaContent & { 'm.mentions'?: { user_ids?: string[] }; 'm.relates_to'?: { rel_type?: string; event_id?: string; key?: string; 'm.in_reply_to'?: { event_id: string } };
-    [AGENT_TRIGGER]?: { agent: string; event: string }; [ORIGIN]?: unknown; [SERVICE]?: unknown };
+    [AGENT_TRIGGER]?: { agent: string; event: string; events?: string[] }; [ORIGIN]?: unknown; [SERVICE]?: unknown; [REPLY]?: unknown };
 };
 export type Mentions = { text: string; mentions: string[]; error?: string };
 export type Mode = 'codex' | 'claude' | 'grok' | 'manager';

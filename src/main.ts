@@ -353,10 +353,12 @@ async function main() {
       async reply(room, event, text, markdown = false, msgtype = 'm.notice', mentions) {
         const replyTo = threadRelation(event);
         const contents = replyContent(mentions?.length ? mentionText(text, mentions) : text, markdown, true, msgtype);
+        const replyId = randomBytes(9).toString('base64url');
         for (const [index, content] of contents.entries()) {
           if (!(await privateRoom(room, event.sender!))) throw new PublicError('Reply withheld because this is no longer an encrypted DM with an allowed account.');
           // Only the last part mentions a peer, after the complete reply is delivered.
-          await client.sendMessage(room, { ...links.outgoing(account.userId, room, event, content, index === contents.length - 1 ? mentions : undefined), 'm.relates_to': replyTo });
+          await client.sendMessage(room, { ...links.outgoing(account.userId, room, event, content,
+            index === contents.length - 1 ? mentions : undefined, replyId), 'm.relates_to': replyTo });
         }
       },
     });
@@ -365,11 +367,12 @@ async function main() {
       const shared = links.room(account.userId, room);
       if (shared) {
         if (!Number.isFinite(event.origin_server_ts) || event.origin_server_ts! < since || !(await privateRoom(room, shared.owner))) return;
-        const fresh = links.observe(account.userId, room, event);
+        links.observe(account.userId, room, event);
         // Other agents are heard as context, never impersonated as the controller.
-        // Only an explicit, budgeted mention starts a separate connector notice turn.
+        // Only an explicit, budgeted mention starts a separate connector notice turn;
+        // each agent evaluates it once, whichever bot recorded the event first.
         if (event.sender !== shared.owner) {
-          const mention = fresh ? links.mention(account.userId, room, event) : undefined;
+          const mention = links.mention(account.userId, room, event);
           if (mention && bridge instanceof Bridge) void bridge.handleAgentMention(room, mention).catch(diagnostics);
           return;
         }
