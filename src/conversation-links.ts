@@ -216,7 +216,8 @@ export class ConversationLinks {
       if (log?.members !== members) continue;
       let cursor = { ...(log.readers[bot] ?? { seq: 1, offset: 0 }) };
       for (const entry of log.messages.filter(m => m.seq >= cursor.seq)) {
-        if (entry.id === event.event_id) { cursor = { seq: entry.seq + 1, offset: 0 }; continue; }
+        // The agent's own messages are already part of its session.
+        if (entry.id === event.event_id || entry.sender === bot) { cursor = { seq: entry.seq + 1, offset: 0 }; continue; }
         const start = entry.seq === cursor.seq ? cursor.offset : 0;
         if (budget < 512) break;
         const part = entry.body.slice(start, start + budget - 400);
@@ -229,7 +230,7 @@ export class ConversationLinks {
       const notes = log.notes?.[bot] ?? [];
       connectorNotes.push(...notes);
       delivery[r.room] = { members, cursor, notes: notes.length };
-      remainingMessages += log.messages.filter(m => m.seq >= cursor.seq).length;
+      remainingMessages += log.messages.filter(m => m.seq >= cursor.seq && m.sender !== bot).length;
     }
     if (!steering) this.deliveries.set(bot, delivery);
     const trigger = event.content?.[AGENT_TRIGGER];

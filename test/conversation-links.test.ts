@@ -395,4 +395,10 @@ test('an outgoing reply with a mention block starts the peer turn after attachme
   const context = JSON.parse(peerPrompts[0].split('\n')[1]);
   assert.equal(context.trigger, 'agent-mention');
   assert.ok(context.unreadSharedMessages.some((m: { id: string }) => m.id === reply.event_id));
+  // An agent is not sent its own messages back.
+  f.links.acknowledge(peer);
+  f.links.observe(peer, group, message('Own reply', '$own', peer));
+  const next = JSON.parse(f.links.prompt(peer, group, message('Next', '$h2'), 'Next').split('\n')[1]);
+  assert.deepEqual(next.unreadSharedMessages, []);
+  assert.equal(next.remainingMessages, 0);
 });
