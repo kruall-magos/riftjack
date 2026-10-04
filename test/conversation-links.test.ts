@@ -514,4 +514,14 @@ test('an agent may decline a shared-room human message with NO_REPLY, but not a 
   await bridge.handle(home, message('Hello', '$private'));
   assert.deepEqual(replies, [[home, '…'], [home, 'NO_REPLY']]);
   assert.match(f.links.prompt(bot, group, message('Hi', '$h'), 'Hi'), /exactly NO_REPLY/);
+  // Declining drops only the text: attachments are still delivered.
+  const sent: string[] = [];
+  const withFile = new Bridge({ botId: bot, owner: human, kind: 'codex', state: f.state, since: 0, timeoutMs: 5000,
+    isAuthorized: id => id === human, isPrivateRoom: async () => true,
+    linkedSession: (room, event) => f.links.key(bot, room, event), shared: room => !!f.links.room(bot, room),
+    run: async () => ({ text: 'NO_REPLY', attachments: [{ path: '/x', root: '/' }] }),
+    sendAttachments: async () => { sent.push('attachment'); }, reply: async (_room, _event, text) => { sent.push(text); }, report: e => { throw e; },
+  });
+  await withFile.handle(group, message('Send the file', '$file'));
+  assert.deepEqual(sent, ['attachment']);
 });

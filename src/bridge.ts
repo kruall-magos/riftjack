@@ -358,17 +358,19 @@ export class Bridge {
           await o.sendAttachments(room, responseEvent, files, controller.signal);
         };
         // A peer-started turn, or any turn in a shared room, may decline to
-        // answer; nothing is sent then. Commands always report their result.
-        const declined = !files.length && (responseEvent.content?.[AGENT_TRIGGER] ? !text.trim() || text.trim() === 'NO_REPLY'
-          : !command && !!o.shared?.(room) && text.trim() === 'NO_REPLY');
-        if (!declined) {
+        // answer: the text is dropped, attachments are still sent. Commands
+        // always report their result.
+        const peerTurn = !!responseEvent.content?.[AGENT_TRIGGER];
+        const quiet = (peerTurn || (!command && !!o.shared?.(room))) && (text.trim() === 'NO_REPLY' || (peerTurn && !text.trim()));
+        if (!quiet || files.length) {
           // A mention wakes the peer, so it goes out only after everything else.
           if (mentions) await sendFiles();
           const respond = (body: string) => o.reply(room, responseEvent, body, !command, command ? 'm.notice' : 'm.text', mentions);
-          if (text || mentions) await respond(text);
-          else if (!files.length) await respond(typeof result === 'string' ? 'The task completed without a text response.' : 'The task completed without a response.');
+          // A declined reply sends no text and wakes nobody.
+          if (!quiet && (text || mentions)) await respond(text);
+          else if (!quiet && !files.length) await respond(typeof result === 'string' ? 'The task completed without a text response.' : 'The task completed without a response.');
           if (!mentions) await sendFiles();
-          if (mention?.error) await o.reply(room, responseEvent, mention.error);
+          if (!quiet && mention?.error) await o.reply(room, responseEvent, mention.error);
         }
         while (current.buffered) await current.steering;
         next = current.followups.shift();
