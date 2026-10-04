@@ -1,6 +1,8 @@
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync, realpathSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, realpathSync, symlinkSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BackgroundTasks, type BackgroundTarget } from '../src/background-tasks.js';
@@ -229,4 +231,101 @@ test('a timer cancelled, reset or revoked during the room check is not sent', as
   const timerEvent: MatrixEvent = { ...event, event_id: '$timer', content: { ...event.content!, body: 'Reminder' } };
   assert.equal(await bridge.resumeBackground(target.room, timerEvent, target.session, () => assert.fail('Must not admit'), () => false), false);
   assert.equal(runs, 0);
+});
+
+
+test('stale watches track valid writes across restarts, then notify once even if the file disappears', async t => {
+  const f = setup(t), start = Date.now();
+  f.queue.action({ ...input, stale_after_minutes: 5 }, target, signal());
+  const received: string[] = [];
+  const options = { valid: () => true, report, deliver: async (_t: BackgroundTarget, message: MatrixEvent, admit: () => void) => {
+    admit(); received.push(message.content!.body!); return true;
+  } };
+  const file = join(f.root, 'status.json');
+  f.status('building');
+  const heartbeat = new Date(start + 4 * 60_000);
+  utimesSync(file, heartbeat, heartbeat);
+  await f.queue.pump(options, start + 4 * 60_000);
+  const queue = new BackgroundTasks(f.file, f.root);
+  rmSync(file);
+  await queue.pump(options, start + 8 * 60_000);
+  assert.equal(received.length, 0);
+  await queue.pump(options, start + 10 * 60_000);
+  await new BackgroundTasks(f.file, f.root).pump(options, start + 11 * 60_000);
+  assert.equal(received.length, 1);
+  assert.match(received[0], /"status":"watch_stalled"/);
+  assert.match(received[0], /may still be running/);
+});
+
+test('malformed writes do not refresh liveness, busy delivery can recover to terminal completion', async t => {
+  const f = setup(t), start = Date.now();
+  f.queue.action({ ...input, stale_after_minutes: 1 }, target, signal());
+  writeFileSync(join(f.root, 'status.json'), '{partial');
+  let deferred = false;
+  await f.queue.pump({ valid: () => true, report, deliver: async (_t, message) => {
+    assert.match(message.content!.body!, /"status":"watch_stalled"/); deferred = true; return false;
+  } }, start + 2 * 60_000);
+  assert.equal(deferred, true);
+  f.status('complete');
+  await f.queue.pump({ valid: () => true, report, deliver: async (_t, message, admit) => {
+    assert.match(message.content!.body!, /"status":"complete"/); admit(); return true;
+  } }, start + 3 * 60_000);
+});
+
+test('PID checks survive restart, treat EPERM as unknown and prefer terminal status to a missing process', async t => {
+  const f = setup(t);
+  let code = 'EPERM';
+  t.mock.method(process, 'kill', (pid: number, sig: number) => {
+    assert.equal(pid, 12345); assert.equal(sig, 0);
+    if (code) throw Object.assign(new Error('probe'), { code });
+    return true;
+  });
+  f.queue.action({ ...input, pid: 12345 }, target, signal());
+  const queue = new BackgroundTasks(f.file, f.root), received: string[] = [];
+  const options = { valid: () => true, report, deliver: async (_t: BackgroundTarget, message: MatrixEvent, admit: () => void) => {
+    admit(); received.push(message.content!.body!); return true;
+  } };
+  await queue.pump(options); code = ''; await queue.pump(options);
+  assert.equal(received.length, 0);
+  code = 'ESRCH'; await queue.pump(options); await new BackgroundTasks(f.file, f.root).pump(options);
+  assert.equal(received.length, 1);
+  assert.match(received[0], /"pid":12345,"status":"watch_process_missing"/);
+  assert.match(received[0], /child processes may still be running/);
+  queue.action({ ...input, pid: 12345, stale_after_minutes: 1 }, target, signal());
+  f.status('complete');
+  await queue.pump(options, Date.now() + 2 * 60_000);
+  assert.match(received[1], /"status":"complete"/);
+});
+
+test('diagnostic watch options are bounded, visible and cannot silently change an existing watch', t => {
+  const f = setup(t);
+  for (const bad of [{ pid: 0 }, { pid: -1 }, { pid: 1.1 }, { pid: 2147483648 }, { pid: '123' },
+    { stale_after_minutes: 0 }, { stale_after_minutes: 10081 }, { stale_after_minutes: 1.1 }]) {
+    assert.throws(() => f.queue.action({ ...input, ...bad }, target, signal()));
+  }
+  const options = { ...input, pid: 12345, stale_after_minutes: 5 };
+  const first = JSON.parse(f.queue.action(options, target, signal()));
+  assert.equal(JSON.parse(f.queue.action(options, target, signal())).id, first.id);
+  assert.throws(() => f.queue.action({ ...options, pid: 12346 }, target, signal()), /different PID/);
+  assert.throws(() => f.queue.action({ ...options, stale_after_minutes: 10 }, target, signal()), /different stale timeout/);
+  const listed = JSON.parse(f.queue.action({ action: 'list' }, target, signal()))[0];
+  assert.equal(listed.pid, 12345); assert.equal(listed.stale_after_minutes, 5);
+  assert.ok(Number.isFinite(Date.parse(listed.last_update)));
+});
+
+
+test('a real supervised process exiting without a terminal file wakes the watch', async t => {
+  const f = setup(t);
+  const child = spawn(process.execPath, ['-e', 'process.stdin.resume()'], { stdio: ['pipe', 'ignore', 'ignore'] });
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill(); });
+  await once(child, 'spawn');
+  f.queue.action({ ...input, pid: child.pid }, target, signal());
+  await f.queue.pump({ valid: () => true, report, deliver: async () => assert.fail('Process still alive') });
+  const exited = once(child, 'exit'); child.kill(); await exited;
+  let delivered = false;
+  await new BackgroundTasks(f.file, f.root).pump({ valid: () => true, report, deliver: async (_t, message, admit) => {
+    assert.match(message.content!.body!, /"status":"watch_process_missing"/);
+    admit(); delivered = true; return true;
+  } });
+  assert.equal(delivered, true);
 });

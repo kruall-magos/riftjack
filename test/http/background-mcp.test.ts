@@ -10,7 +10,7 @@ import { createBackend } from '../../src/backends.js';
 import { loadConfig } from '../../src/config.js';
 import { State } from '../../src/state.js';
 
-const input = { action: 'watch', label: 'Example build', status_file: 'status.json', field: 'stage', terminal: ['complete', 'failed'] };
+const input = { action: 'watch', label: 'Example build', status_file: 'status.json', field: 'stage', terminal: ['complete', 'failed'], pid: process.pid, stale_after_minutes: 5 };
 test('background MCP has scoped authentication and closes at the end of the task', async t => {
   const lifetime = new AbortController();
   let called = 0;
@@ -38,6 +38,8 @@ test('background MCP advertises and schedules delayed messages', async t => {
     headers: { ...server.headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id, method, params }) })).json());
   const tools = await call(1, 'tools/list');
   assert.ok(tools.result.tools[0].inputSchema.properties.action.enum.includes('remind'));
+  assert.equal(tools.result.tools[0].inputSchema.properties.pid.minimum, 1);
+  assert.equal(tools.result.tools[0].inputSchema.properties.stale_after_minutes.maximum, 10080);
   const scheduled = JSON.parse((await call(2, 'tools/call', { name: 'background_tasks',
     arguments: { action: 'remind', label: 'Later', message: 'Check the build.', deliver: 'room', delay_minutes: 30 } })).result.content[0].text);
   assert.deepEqual([scheduled.room, scheduled.message, scheduled.state], ['!room:test', 'Check the build.', 'waiting']);

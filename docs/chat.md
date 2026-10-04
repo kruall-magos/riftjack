@@ -33,6 +33,27 @@ then register:
 {"action":"watch","label":"Example build","status_file":"build-status.json","field":"stage","terminal":["complete","failed"],"timeout_hours":24}
 ```
 
+For a supervised task, optionally add `pid` (the supervisor's positive process ID
+on this host) and `stale_after_minutes` (1–10080). For example, a runner that
+atomically updates the status file every 20 seconds can use a five-minute stale
+timeout. The runner must be launched independently of the agent turn; registering
+a watch does not detach it or protect it from termination.
+
+A missing PID produces `watch_process_missing`; an unchanged or unreadable JSON
+file produces `watch_stalled` after the stale timeout. Valid file modification
+time refreshes that timeout; registration starts a fresh grace period. The last
+observed update is saved across connector restarts, including when the file then
+disappears. A terminal status takes precedence over these two diagnostic outcomes.
+Permission errors checking a PID are inconclusive, not evidence of termination.
+PID checks cannot detect hangs or reuse of the number by another process; combine
+them with regular status updates where practical.
+
+Each diagnostic notification ends its watch, just like expiry. Neither declares
+the task failed nor stops anything: child processes may survive the supervisor.
+Inspect the process and logs before retrying work, and register a new watch if
+monitoring should continue. Watches without these options retain the ordinary
+completion/expiry behavior. Notifications still wait for the agent to be idle.
+
 The same tool schedules delayed messages for up to 7 days, for example when you
 ask a bot to remind you of something tomorrow:
 
