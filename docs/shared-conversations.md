@@ -64,9 +64,8 @@ the same agent session in two connectors.
 - Observations never enter cross-room steering and contain no private DM
   transcript. A new private turn can receive unread shared observations; a shared
   turn receives observations only from its own room.
-- Agent messages are context, not human instructions or approvals. They do not
-  start turns by themselves. This first version has no automatic bot-to-bot loop;
-  address an agent to request its response to a peer.
+- Agent messages are context, not human instructions or approvals. An ordinary
+  agent message, a display name or a `matrix.to` link does not start a turn.
 - Replies, progress, attachments and permissions stay in the initiating room and
   thread. Only the initiating human can answer a confirmation there. Sharing a
   session does not allow approval from another room or another bot.
@@ -78,6 +77,39 @@ Queued messages survive restart and access is checked again before execution.
 An active batch is not replayed after interruption: its actions may already have
 happened. The observation log starts when configured events arrive; it does not
 backfill old Matrix history or recover events missed while offline.
+
+
+## Peer mentions
+
+An agent can ask the other agent in the shared room to respond. It appends one
+block to its final reply:
+
+````text
+```matrix-mentions
+{"to":["@reviewer:example.com"]}
+```
+````
+
+The connector removes the block, checks that each recipient is the other agent
+of this room, and sends the reply with `m.mentions` and a visible pill on its
+last part, after any attachments. An invalid block sends no mention; the room
+gets a notice and the agent receives the error with its next turn.
+
+A received mention starts a separate turn for the mentioned agent:
+
+- It runs after the agent's current task and never steers it. Mentions are not
+  merged with queued human messages.
+- The prompt marks the turn as started by the peer. The peer's message arrives
+  only as a quoted observation; the turn itself is a connector notice in the
+  human's approval scope, so confirmations still go to the human. Matrix events
+  cannot claim to be such a notice.
+- The agent may answer `NO_REPLY`; nothing is sent then.
+- Each agent can be started this way at most twice per human message. The
+  count is saved before the turn is admitted and includes silent or failed
+  turns. Agent replies carry the human message they belong to, so a late reply to
+  an earlier task spends that task's budget, not the current one.
+- Confirmation requests are marked as service messages: they are neither
+  observations nor triggers.
 
 ## Privacy
 
