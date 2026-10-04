@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { ConversationLinks, isSharedRoomState } from '../src/conversation-links.js';
+import { ConversationLinks, isSharedRoomState, MENTION_REPLY_LIMIT, mentionText } from '../src/conversation-links.js';
+import { replyContent } from '../src/message-format.js';
 import { State } from '../src/state.js';
-import { Bridge, sessionKey, type MatrixEvent } from '../src/bridge.js';
 import { linkedRoomMessages } from '../src/room-messages.js';
+import { AGENT_TRIGGER, Bridge, ORIGIN, REPLY, SERVICE, sessionKey, type MatrixEvent } from '../src/bridge.js';
 
 const human = '@alice:test', bot = '@builder:test', peer = '@reviewer:test';
 const home = '!home:test', group = '!group:test';
@@ -278,4 +279,221 @@ test('slow room authorization cannot reorder incoming linked-room messages', asy
   assert.deepEqual(calls, ['First']); finish.release(); await first;
   while (bridge.busy) await tick();
   assert.deepEqual(calls, ['First', 'Second']);
+});
+
+function pair(t: { after(fn: () => void): void }) {
+  const f = fixture(t);
+  const config = { ...f.config, agents: [...f.config.agents, { bot: peer, owner: human, home: '!peer-home:test', session: 'peer-thread' }] };
+  f.state.update(sessionKey('!peer-home:test', message('')), { claude: 'peer-thread' });
+  writeFileSync(f.path, JSON.stringify(config));
+  const load = () => new ConversationLinks(f.path, join(f.dir, 'history.json'), [
+    { userId: bot, kind: 'codex', name: 'Builder', accessToken: 'test' },
+    { userId: peer, kind: 'claude', name: 'Reviewer', accessToken: 'test' },
+  ], f.state, human);
+  return { ...f, load, links: load() };
+}
+const mentioning = (body: string, id: string, sender: string, to: string[], origin?: string): MatrixEvent => {
+  const event = message(body, id, sender);
+  Object.assign(event.content!, { 'm.mentions': { user_ids: to }, ...(origin && { [ORIGIN]: origin }) });
+  return event;
+};
+
+test('explicit peer mentions start a durable, budgeted connector notice per human message', t => {
+  const f = pair(t);
+  let links = f.links;
+  assert.equal(links.observe(bot, group, message('Task', '$h1')), true);
+  assert.equal(links.observe(bot, group, message('Task', '$h1')), false);
+  assert.equal(links.mention(bot, group, message('No mention', '$p0', peer)), undefined);
+  assert.equal(links.mention(bot, group, mentioning('From the owner', '$h-self', human, [bot])), undefined);
+  assert.equal(links.mention(peer, group, mentioning('Self', '$p-self', peer, [peer])), undefined);
+  const service = mentioning('Confirmation', '$svc', peer, [bot]); Object.assign(service.content!, { [SERVICE]: 'confirmation' });
+  assert.equal(links.observe(bot, group, service), false);
+  assert.equal(links.mention(bot, group, service), undefined);
+  const first = links.mention(bot, group, mentioning('Question', '$p1', peer, [bot], '$h1'))!;
+  assert.equal(first.sender, human);
+  assert.notEqual(first.event_id, '$p1');
+  assert.deepEqual(first.content![AGENT_TRIGGER], { agent: peer, event: '$p1', events: [] });
+  assert.equal(first.content![ORIGIN], '$h1');
+  // Each agent evaluates a peer event once.
+  assert.equal(links.mention(bot, group, mentioning('Question', '$p1', peer, [bot], '$h1')), undefined);
+  assert.ok(links.mention(bot, group, mentioning('Again', '$p2', peer, [bot], '$h1')));
+  links = f.load();
+  assert.equal(links.mention(bot, group, mentioning('Third', '$p3', peer, [bot], '$h1')), undefined);
+  // The other agent has its own budget for the same human message.
+  assert.ok(links.mention(peer, group, mentioning('To reviewer', '$b1', bot, [peer], '$h1')));
+  links.observe(bot, group, message('Next task', '$h2'));
+  // A late reply to the old task cannot spend the budget of the new one.
+  assert.equal(links.mention(bot, group, mentioning('Late', '$p4', peer, [bot], '$h1')), undefined);
+  // Unknown, missing or expired origins are refused instead of charging the current task.
+  assert.equal(links.mention(bot, group, mentioning('Unknown origin', '$p5', peer, [bot], '$forged')), undefined);
+  assert.equal(links.mention(bot, group, mentioning('No origin', '$p6', peer, [bot])), undefined);
+  assert.ok(links.mention(bot, group, mentioning('Current', '$p7', peer, [bot], '$h2')));
+  for (let i = 0; i < 100; i++) links.observe(bot, group, message('Filler', '$fill' + i));
+  assert.equal(links.mention(bot, group, mentioning('Expired', '$p8', peer, [bot], '$h2')), undefined);
+  const context = JSON.parse(links.prompt(bot, group, first, first.content!.body!).split('\n')[1]);
+  assert.equal(context.author, peer);
+  assert.equal(context.trigger, 'agent-mention');
+  assert.match(links.prompt(bot, group, first, first.content!.body!), /Current connector notice:\n[^]*NO_REPLY/);
+  assert.match(links.prompt(bot, group, message('Hi', '$h3'), 'Hi'), /matrix-mentions/);
+  assert.ok(!links.prompt(bot, home, message('Hi', '$h4'), 'Hi').includes('matrix-mentions'));
+});
+
+test('mention blocks are validated, removed and reported back to the agent', t => {
+  const f = pair(t), links = f.links;
+  links.observe(bot, group, message('Task', '$h1'));
+  const block = (json: string) => 'Answer\n```matrix-mentions\n' + json + '\n```';
+  assert.deepEqual(links.mentions(bot, group, block(`{"to":["${peer}","${peer}"]}`)), { text: 'Answer', mentions: [peer] });
+  assert.deepEqual(links.mentions(bot, group, 'Plain reply'), { text: 'Plain reply', mentions: [] });
+  // Examples inside another fence, a quote or a list are text, not requests.
+  const example = 'See:\n````markdown\n' + block(`{"to":["${peer}"]}`) + '\n````';
+  assert.deepEqual(links.mentions(bot, group, example), { text: example, mentions: [] });
+  for (const nested of ['> ' + block(`{"to":["${peer}"]}`).replace(/\n/g, '\n> '), '- item\n\n  ```matrix-mentions\n  {"to":["' + peer + '"]}\n  ```']) {
+    assert.deepEqual(links.mentions(bot, group, nested)!.mentions, []);
+  }
+  // The real block is removed by position, even after an identical example.
+  const real = '```matrix-mentions\n{"to":["' + peer + '"]}\n```';
+  const withExample = links.mentions(bot, group, '````markdown\n' + real + '\n````\n\nDone.\n\n' + real)!;
+  assert.deepEqual(withExample.mentions, [peer]);
+  assert.equal(withExample.text, '````markdown\n' + real + '\n````\n\nDone.');
+  // A mentioning reply must fit into the quote its notice carries.
+  const tooLong = links.mentions(bot, group, 'x'.repeat(MENTION_REPLY_LIMIT + 1) + '\n\n' + real)!;
+  assert.deepEqual(tooLong.mentions, []);
+  assert.match(tooLong.error!, /at most/);
+  assert.equal(links.mentions(bot, home, block(`{"to":["${peer}"]}`)), undefined);
+  for (const bad of [block(`{"to":["${human}"]}`), block(`{"to":["${bot}"]}`), block('{"to":'), block('{"to":[]}'),
+    block(`{"to":["${peer}"]}`) + '\n' + block(`{"to":["${peer}"]}`)]) {
+    const parsed = links.mentions(bot, group, bad)!;
+    assert.deepEqual(parsed.mentions, []);
+    assert.ok(parsed.error);
+    assert.ok(!parsed.text.includes('matrix-mentions'));
+  }
+  const notes = () => JSON.parse(links.prompt(bot, group, message('Next', '$h2'), 'Next').split('\n')[1]).connectorNotes;
+  assert.equal(notes().length, 5);
+  links.acknowledge(bot);
+  assert.equal(notes(), undefined);
+  const reply = links.outgoing(bot, group, message('Task', '$h1'), { msgtype: 'm.text', body: 'x' }, [peer]);
+  assert.equal(reply[ORIGIN], '$h1');
+  assert.deepEqual(reply['m.mentions'], { user_ids: [peer] });
+  assert.equal(links.outgoing(bot, group, message('Task', '$h1'), { msgtype: 'm.notice', body: 'x' })[ORIGIN], undefined);
+  assert.deepEqual(links.outgoing(bot, home, message('Task', '$h1'), { msgtype: 'm.text', body: 'x' }, [peer]), { msgtype: 'm.text', body: 'x' });
+  assert.match(mentionText('Answer', [peer]), /\[@reviewer:test\]\(https:\/\/matrix\.to\/#\/@reviewer:test\)$/);
+});
+
+test('peer-started turns may stay silent, never steer and cannot be injected from Matrix', async t => {
+  const f = pair(t), started = gate(), finish = gate();
+  const calls: string[] = [], replies: string[] = [];
+  let steers = 0;
+  const bridge = new Bridge({ botId: bot, owner: human, kind: 'codex', state: f.state, since: 0, timeoutMs: 5000,
+    isAuthorized: id => id === human, isPrivateRoom: async () => true,
+    linkedSession: (room, event) => f.links.key(bot, room, event),
+    steer: async () => { steers++; return true; }, report: e => { throw e; },
+    reply: async (_room, _event, text) => { replies.push(text); },
+    run: async (_kind, prompt) => {
+      calls.push(prompt);
+      if (prompt === 'Long task') { started.release(); await finish.promise; return 'done'; }
+      return prompt.includes('Another agent') ? 'NO_REPLY' : 'answer';
+    },
+  });
+  f.links.observe(bot, group, message('Task', '$h1'));
+  let asked = 0;
+  const notice = () => f.links.mention(bot, group, mentioning('Question', '$p' + asked++, peer, [bot], '$h1'))!;
+  await bridge.handle(group, notice());
+  assert.deepEqual(calls, []);
+  await bridge.handleAgentMention(group, notice());
+  assert.equal(calls.length, 1); assert.deepEqual(replies, []);
+  const task = bridge.handle(group, message('Long task', '$long')); await started.promise;
+  const replied = replies.length;
+  f.links.observe(bot, group, message('Another task', '$h2'));
+  await bridge.handleAgentMention(group, f.links.mention(bot, group, mentioning('While busy', '$busy', peer, [bot], '$h2'))!);
+  await bridge.handle(group, message('Follow-up', '$after'));
+  assert.equal(steers, 1); assert.equal(f.state.queued(bot), 1); assert.equal(replies.length, replied + 1);
+  finish.release(); await task;
+  while (bridge.busy) await tick();
+  assert.equal(calls.length, 3);
+  assert.match(calls[2], /Another agent/);
+});
+
+test('an outgoing reply with a mention block starts the peer turn after attachments', async t => {
+  const f = pair(t), sent: string[] = [], peerPrompts: string[] = [], events: MatrixEvent[] = [];
+  const replyContentFor = (room: string, event: MatrixEvent, text: string, msgtype: 'm.text' | 'm.notice', mentions?: string[]) => {
+    const contents = replyContent(mentions?.length ? mentionText(text, mentions) : text, true, true, msgtype);
+    return contents.map((content, index) => f.links.outgoing(bot, room, event, content, index === contents.length - 1 ? mentions : undefined, 'reply-' + events.length));
+  };
+  const builder = new Bridge({ botId: bot, owner: human, kind: 'codex', state: f.state, since: 0, timeoutMs: 5000,
+    isAuthorized: id => id === human, isPrivateRoom: async () => true,
+    linkedSession: (room, event) => f.links.key(bot, room, event), report: e => { throw e; },
+    mentions: (room, text) => f.links.mentions(bot, room, text),
+    sendAttachments: async () => { sent.push('attachment'); },
+    reply: async (room, event, text, _markdown, msgtype = 'm.notice', mentions) => {
+      sent.push(msgtype);
+      for (const content of replyContentFor(room, event, text, msgtype, mentions)) {
+        events.push({ type: 'm.room.message', sender: bot, event_id: '$out' + events.length, origin_server_ts: 3000, content });
+      }
+    },
+    run: async () => ({ text: 'Please review.\n```matrix-mentions\n{"to":["' + peer + '"]}\n```', attachments: [{ path: '/x', root: '/' }] }),
+  });
+  const reviewer = new Bridge({ botId: peer, owner: human, kind: 'claude', state: f.state, since: 0, timeoutMs: 5000,
+    isAuthorized: id => id === human, isPrivateRoom: async () => true,
+    linkedSession: (room, event) => f.links.key(peer, room, event), report: e => { throw e; },
+    decoratePrompt: (room, event, prompt, steering) => f.links.prompt(peer, room, event, prompt, steering),
+    reply: async () => {}, run: async (_kind, prompt) => { peerPrompts.push(prompt); return 'NO_REPLY'; },
+  });
+  const task = message('Build it', '$h1');
+  f.links.observe(peer, group, task);
+  await builder.handle(group, task);
+  assert.deepEqual(sent.filter(s => s !== 'm.notice'), ['attachment', 'm.text']);
+  const reply = events.at(-1)!;
+  assert.deepEqual(reply.content!['m.mentions'], { user_ids: [peer] });
+  assert.equal(reply.content![ORIGIN], '$h1');
+  assert.ok(!reply.content!.body!.includes('matrix-mentions'));
+  // The same path main.ts uses for the peer's incoming Matrix event.
+  assert.equal(f.links.observe(peer, group, reply), true);
+  await reviewer.handleAgentMention(group, f.links.mention(peer, group, reply)!);
+  assert.equal(peerPrompts.length, 1);
+  const context = JSON.parse(peerPrompts[0].split('\n')[1]);
+  assert.equal(context.trigger, 'agent-mention');
+  // The question arrives quoted in the notice, not again as an observation.
+  assert.match(peerPrompts[0], /Current connector notice:[^]*Please review\./);
+  assert.ok(!context.unreadSharedMessages.some((m: { id: string }) => m.id === reply.event_id));
+  // An agent is not sent its own messages back.
+  f.links.acknowledge(peer);
+  f.links.observe(peer, group, message('Own reply', '$own', peer));
+  const next = JSON.parse(f.links.prompt(peer, group, message('Next', '$h2'), 'Next').split('\n')[1]);
+  assert.deepEqual(next.unreadSharedMessages, []);
+  assert.equal(next.remainingMessages, 0);
+});
+
+test('mentions trigger once per recipient in any delivery order and carry the whole question', t => {
+  for (const order of [[peer, bot], [bot, peer]]) {
+    const f = pair(t);
+    f.links.observe(bot, group, message('Task', '$h1'));
+    const question = mentioning('Question', '$q', peer, [bot], '$h1');
+    const starts = order.map(id => { f.links.observe(id, group, question); return f.links.mention(id, group, question); }).filter(Boolean);
+    assert.equal(starts.length, 1);
+  }
+  const f = pair(t);
+  const part = (body: string, id: string, reply: string) => { const event = message(body, id, peer); Object.assign(event.content!, { [REPLY]: reply }); return event; };
+  f.links.observe(bot, group, message('Task', '$h1'));
+  f.links.observe(bot, group, part('x'.repeat(15_000), '$backlog', 'r0'));
+  f.links.observe(bot, group, part('Earlier part. ', '$part1', 'r1'));
+  const last = mentioning('Please review the parser.', '$part2', peer, [bot], '$h1');
+  Object.assign(last.content!, { [REPLY]: 'r1' });
+  f.links.observe(bot, group, last);
+  const notice = f.links.mention(bot, group, last)!;
+  assert.deepEqual(notice.content![AGENT_TRIGGER]!.events, ['$part1', '$part2']);
+  assert.match(f.links.prompt(bot, group, notice, notice.content!.body!), /Earlier part\. Please review the parser\./);
+  // The quoted parts are not delivered a second time as observations.
+  f.links.acknowledge(bot);
+  const next = JSON.parse(f.links.prompt(bot, group, message('Next', '$h2'), 'Next').split('\n')[1]);
+  assert.ok(!next.unreadSharedMessages.some((m: { id: string }) => m.id === '$part1' || m.id === '$part2'));
+  // An oversized reply from another installation is quoted partially and stays unread in full.
+  const g = pair(t);
+  g.links.observe(bot, group, message('Task', '$h1'));
+  g.links.observe(bot, group, part('IMPORTANT-FIRST-PART' + 'y'.repeat(9000), '$big1', 'r2'));
+  const tail = mentioning('Short question?', '$big2', peer, [bot], '$h1');
+  Object.assign(tail.content!, { [REPLY]: 'r2' });
+  g.links.observe(bot, group, tail);
+  const partial = g.links.mention(bot, group, tail)!;
+  assert.deepEqual(partial.content![AGENT_TRIGGER]!.events, []);
+  assert.match(g.links.prompt(bot, group, partial, partial.content!.body!), /IMPORTANT-FIRST-PART[^]*"truncated":true/);
 });

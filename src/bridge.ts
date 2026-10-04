@@ -14,10 +14,16 @@ import { Interactions, type Interact, type ReactionControls } from './interactio
 import type { PublishAction } from './publish-mcp.js';
 import { feedbackMeaning, reactionFeedback, type ReactionReader } from './reaction-feedback.js';
 
+// Connector-defined content fields. A trigger marks a turn started by a peer
+// agent's mention; it is created locally and never accepted from Matrix.
+// A reply ID is shared by the parts of one split reply.
+export const AGENT_TRIGGER = 'riftjack.trigger', ORIGIN = 'riftjack.origin', SERVICE = 'riftjack.service', REPLY = 'riftjack.reply';
 export type MatrixEvent = {
   type?: string; event_id?: string; sender?: string; origin_server_ts?: number; room_id?: string;
-  content?: MediaContent & { 'm.mentions'?: { user_ids?: string[] }; 'm.relates_to'?: { rel_type?: string; event_id?: string; key?: string; 'm.in_reply_to'?: { event_id: string } } };
+  content?: MediaContent & { 'm.mentions'?: { user_ids?: string[] }; 'm.relates_to'?: { rel_type?: string; event_id?: string; key?: string; 'm.in_reply_to'?: { event_id: string } };
+    [AGENT_TRIGGER]?: { agent: string; event: string; events?: string[] }; [ORIGIN]?: unknown; [SERVICE]?: unknown; [REPLY]?: unknown };
 };
+export type Mentions = { text: string; mentions: string[]; error?: string };
 export type Mode = 'codex' | 'claude' | 'grok' | 'manager';
 export type BackendHooks = { background?: BackgroundAction; progress?: (text: string) => Promise<void>; sendAttachments?: SendAttachments; roomMessages?: ToolAction };
 export type Backend = (mode: Mode, prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[], interact?: Interact, publish?: PublishAction, hooks?: BackendHooks) => Promise<string | BackendReply>;
@@ -31,7 +37,7 @@ type Options = {
   owner?: string;
   isStopping?: () => boolean;
   restart?: (reply: (text: string) => Promise<void>, target: RestartTarget, scope: RestartScope) => Promise<void>;
-  reply: (room: string, event: MatrixEvent, text: string, markdown?: boolean, msgtype?: 'm.text' | 'm.notice') => Promise<void>;
+  reply: (room: string, event: MatrixEvent, text: string, markdown?: boolean, msgtype?: 'm.text' | 'm.notice', mentions?: string[]) => Promise<void>;
   confirmation?: (room: string, event: MatrixEvent, text: string, controls: ReactionControls, markdown: string) => Promise<void>;
   receive?: (event: MatrixEvent, key: string, signal: AbortSignal) => Promise<IncomingAttachment>;
   reactionTarget?: ReactionReader;
@@ -47,6 +53,8 @@ type Options = {
   linkedSession?: (room: string, event: MatrixEvent) => string;
   decoratePrompt?: (room: string, event: MatrixEvent, prompt: string, steering?: boolean) => string;
   promptDelivered?: () => void;
+  // Extracts a validated peer mention request from a final reply in a shared room.
+  mentions?: (room: string, text: string) => Mentions | undefined;
 };
 function help(kind: Mode): string {
   return kind === 'manager' ? MANAGER_HELP : botHelp(kind);
@@ -76,9 +84,16 @@ export class Bridge {
   revoke(sender: string) { if (this.active?.sender === sender) this.active.controller.abort(); }
   async handle(room: string, event: MatrixEvent): Promise<void> {
     const o = this.options;
-    if (!event.sender || !o.isAuthorized(event.sender) || event.sender === o.botId) return;
+    if (!event.sender || !o.isAuthorized(event.sender) || event.sender === o.botId || event.content?.[AGENT_TRIGGER]) return;
     if (event.type === 'm.reaction') { await this.handleReaction(room, event); return; }
     await this.handleMessage(room, event);
+  }
+
+  // A budgeted peer mention prepared by the conversation links. It runs in the
+  // human's approval scope, never steers a running task and may end silently.
+  async handleAgentMention(room: string, event: MatrixEvent): Promise<void> {
+    if (!this.options.linkedSession || !event.content?.[AGENT_TRIGGER]) return;
+    await this.handleMessage(room, event, true);
   }
 
   async resumeBackground(room: string, event: MatrixEvent, session: string, admitted: () => void): Promise<boolean> {
@@ -220,8 +235,13 @@ export class Bridge {
     if (verb === 'reset' && o.linkedSession) {
       await reply('This agent continues a pinned session across linked rooms. Reset is disabled; explicitly reconfigure its session link to replace that history.'); return;
     }
+    const agentTurn = !!event.content?.[AGENT_TRIGGER];
     if (this.active || (this.draining && !fromQueue) || (!fromQueue && o.linkedSession && o.state.queued(o.botId) > 0)) {
-      if (o.linkedSession && (verb === 'codex' || verb === 'claude') &&
+      if (agentTurn) {
+        // Peer mentions are delivered as their own turn after the current one.
+        if (o.state.enqueue(o.botId, { room, event, feedback })) void this.drainQueued().catch(o.report);
+        else o.report(new PublicError('A peer mention was dropped because the linked-room queue is full.'));
+      } else if (o.linkedSession && (verb === 'codex' || verb === 'claude') &&
           (!this.active || (this.active.key !== key && this.active.backendKey === backendKey))) {
         const accepted = o.state.enqueue(o.botId, { room, event, feedback });
         await reply(accepted ? 'Queued for this agent after its current conversation.' : 'The linked-room queue is full. Please resend after the agent finishes.');
@@ -324,15 +344,25 @@ export class Bridge {
         finally { turnLifetime.abort(); current.running = false; current.interactions.close(); }
         while (current.buffered) await current.steering;
         controller.signal.throwIfAborted();
-        const respond = (text: string) => o.reply(room, next!.event, text, !next!.prompt.startsWith('!'), next!.prompt.startsWith('!') ? 'm.notice' : 'm.text');
-        if (typeof result === 'string') {
-          await respond(result || 'The task completed without a text response.');
-        } else {
-          if (result.text) await respond(result.text);
-          if (result.attachments.length) {
-            if (!o.sendAttachments) throw new PublicError('Attachment sending is not configured.');
-            await o.sendAttachments(room, next.event, result.attachments, controller.signal);
-          } else if (!result.text) await respond('The task completed without a response.');
+        const command = next.prompt.startsWith('!'), responseEvent = next.event;
+        const files = typeof result === 'string' ? [] : result.attachments;
+        const mention = command ? undefined : o.mentions?.(room, typeof result === 'string' ? result : result.text);
+        const text = mention?.text ?? (typeof result === 'string' ? result : result.text);
+        const mentions = mention?.mentions.length ? mention.mentions : undefined;
+        const sendFiles = async () => {
+          if (!files.length) return;
+          if (!o.sendAttachments) throw new PublicError('Attachment sending is not configured.');
+          await o.sendAttachments(room, responseEvent, files, controller.signal);
+        };
+        // A peer-started turn may decline to answer; nothing is sent then.
+        if (!responseEvent.content?.[AGENT_TRIGGER] || files.length || (text.trim() && text.trim() !== 'NO_REPLY')) {
+          // A mention wakes the peer, so it goes out only after everything else.
+          if (mentions) await sendFiles();
+          const respond = (body: string) => o.reply(room, responseEvent, body, !command, command ? 'm.notice' : 'm.text', mentions);
+          if (text || mentions) await respond(text);
+          else if (!files.length) await respond(typeof result === 'string' ? 'The task completed without a text response.' : 'The task completed without a response.');
+          if (!mentions) await sendFiles();
+          if (mention?.error) await o.reply(room, responseEvent, mention.error);
         }
         while (current.buffered) await current.steering;
         next = current.followups.shift();

@@ -16,12 +16,12 @@ import { WorkerMatrixClient } from './worker-matrix-client.js';
 import { WorkerQueue } from './worker-queue.js';
 import { WorkerService } from './worker-service.js';
 import { WorkerServer } from './worker-server.js';
-import { Bridge, type MatrixEvent } from './bridge.js';
+import { Bridge, SERVICE, type MatrixEvent } from './bridge.js';
 import { replyContent } from './message-format.js';
 import { inlineCode, markdownText, managerBotList } from './manager-format.js';
 import { createMatrixUser, parseUserCreation } from './matrix-users.js';
 import { isPrivateRoom } from './private-room.js';
-import { ConversationLinks } from './conversation-links.js';
+import { ConversationLinks, mentionText } from './conversation-links.js';
 import { sendConfirmation } from './confirmation-message.js';
 import { createBackend } from './backends.js';
 import { Accounts, parseManagerRequest, provision, PublicError, type Account } from './accounts.js';
@@ -250,6 +250,7 @@ async function main() {
         allowed: privateRoom, stopping: () => stopping || restart.pending,
         send: (room, content) => client.sendMessage(room, content),
       })(request, signal) : undefined,
+      mentions: linkedAgent ? (room, text) => links.mentions(account.userId, room, text) : undefined,
       publish: (account.kind === 'codex' || account.kind === 'claude') && botConfig.sandbox !== 'read-only'
         ? (input, signal, interact, authorize) => requestPublish(input, botConfig.workspace, botConfig.dataDir, botConfig.maxMediaBytes, signal, interact, authorize) : undefined,
       background: background ? async (input, { room, event, key }, signal) => {
@@ -344,7 +345,8 @@ async function main() {
           authorize: async () => {
             if (!(await privateRoom(room, event.sender!))) throw new PublicError('Confirmation withheld because this is no longer an encrypted DM with an allowed account.');
           },
-          sendMessage: content => client.sendMessage(room, { ...content, 'm.relates_to': threadRelation(event) }),
+          // Marked as a service message: it is neither a peer observation nor a turn trigger.
+          sendMessage: content => client.sendMessage(room, { ...content, [SERVICE]: 'confirmation', 'm.relates_to': threadRelation(event) }),
           // Standard Matrix annotations are unencrypted, even in encrypted rooms.
           // Keep only the target event ID and emoji in the reaction payload.
           sendReaction: (eventId, key) => client.sendRawEvent(room, 'm.reaction', {
@@ -353,11 +355,15 @@ async function main() {
           report: diagnostics,
         }, markdown);
       },
-      async reply(room, event, text, markdown = false, msgtype = 'm.notice') {
+      async reply(room, event, text, markdown = false, msgtype = 'm.notice', mentions) {
         const replyTo = threadRelation(event);
-        for (const content of replyContent(text, markdown, true, msgtype)) {
+        const contents = replyContent(mentions?.length ? mentionText(text, mentions) : text, markdown, true, msgtype);
+        const replyId = randomBytes(9).toString('base64url');
+        for (const [index, content] of contents.entries()) {
           if (!(await privateRoom(room, event.sender!))) throw new PublicError('Reply withheld because this is no longer an encrypted DM with an allowed account.');
-          await client.sendMessage(room, { ...content, 'm.relates_to': replyTo });
+          // Only the last part mentions a peer, after the complete reply is delivered.
+          await client.sendMessage(room, { ...links.outgoing(account.userId, room, event, content,
+            index === contents.length - 1 ? mentions : undefined, replyId), 'm.relates_to': replyTo });
         }
       },
     });
@@ -368,8 +374,14 @@ async function main() {
         if (!Number.isFinite(event.origin_server_ts) || event.origin_server_ts! < since || !(await privateRoom(room, shared.owner))) return;
         links.observe(account.userId, room, event);
         // Other agents are heard as context, never impersonated as the controller.
-        // Their output does not start another turn or an unbounded bot dialogue.
-        if (event.sender !== shared.owner || !links.addressed(account.userId, room, event)) return;
+        // Only an explicit, budgeted mention starts a separate connector notice turn;
+        // each agent evaluates it once, whichever bot recorded the event first.
+        if (event.sender !== shared.owner) {
+          const mention = links.mention(account.userId, room, event);
+          if (mention && bridge instanceof Bridge) void bridge.handleAgentMention(room, mention).catch(diagnostics);
+          return;
+        }
+        if (!links.addressed(account.userId, room, event)) return;
       }
       // Serialize admission/observations, not model work: confirmations and
       // same-room steering must still get through while the agent is running.
