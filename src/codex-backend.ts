@@ -14,6 +14,11 @@ import { installPlugin } from './plugins.js';
 import { engineReport } from './bot-status.js';
 import { startPublishMcp, PUBLISH_SERVER, publicationInstructions } from './publish-mcp.js';
 
+// Codex validates transport fields before checking enabled. Explicitly disable
+// unavailable tools (including stale per-turn endpoints on resumed threads)
+// with a valid inert transport; enabled=false prevents any connection.
+const disabledMcp = { enabled: false, url: 'http://127.0.0.1:9/mcp' };
+
 function deferred<T>() {
   let resolve!: (value: T) => void, reject!: (error: unknown) => void;
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
@@ -127,20 +132,20 @@ export function createCodexBackend(configuration: Config | (() => Config), state
             // Invoking this tool starts the review; requestPublish itself requires Matrix
             // approval after delivering the HTML. Avoid an empty MCP consent form first.
             tools: { prepare_publish: { approval_mode: 'approve' } },
-          } : { enabled: false },
+          } : disabledMcp,
           [`mcp_servers.${BACKGROUND_SERVER}`]: background ? { url: background.url, http_headers: background.headers,
             required: true, enabled: true, enabled_tools: ['background_tasks'],
             tools: { background_tasks: { approval_mode: 'approve' } },
-          } : { enabled: false },
+          } : disabledMcp,
           [`mcp_servers.${ATTACHMENT_SERVER}`]: media ? { url: media.url, http_headers: media.headers,
             required: true, enabled: true, tool_timeout_sec: Math.ceil(config.timeoutMs / 1000), enabled_tools: ['send_attachments'],
             tools: { send_attachments: { approval_mode: 'approve' } },
-          } : { enabled: false },
+          } : disabledMcp,
           ...(config.codexReasoningEffort ? { model_reasoning_effort: config.codexReasoningEffort } : {}),
           [`mcp_servers.${ROOM_MESSAGE_SERVER}`]: rooms ? { url: rooms.url, http_headers: rooms.headers,
             required: true, enabled: true, tool_timeout_sec: Math.ceil(config.timeoutMs / 1000), enabled_tools: ['room_messages'],
             tools: { room_messages: { approval_mode: 'approve' } },
-          } : { enabled: false },
+          } : disabledMcp,
         },
       };
       const thread = await server.request<{ thread: { id: string }; model?: string; reasoningEffort?: string | null; serviceTier?: string | null; cwd?: string }>(saved ? 'thread/resume' : 'thread/start', saved ? { ...options, threadId: saved, excludeTurns: true } : options);

@@ -50,7 +50,16 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     return respond(id, { authPolicy: 'ON_USE', appsNeedingAuth: [{ name: 'GitHub', installUrl: 'https://github.test/login' }] });
   }
   if (method === 'thread/resume' && p.threadId === 'busy_thread') return send({ id, error: { code: -32600, message: 'thread busy_thread already has an active writer' } });
-  if (method === 'thread/start' || method === 'thread/resume') { instructions = p.developerInstructions; return respond(id, { thread: { id: threadId }, model: 'resolved-model', reasoningEffort: 'medium', serviceTier: 'default', cwd: process.cwd() }); }
+  if (method === 'thread/start' || method === 'thread/resume') {
+    // Codex validates the transport even for a disabled MCP server.
+    for (const [key, server] of Object.entries(p.config || {})) {
+      if (key.startsWith('mcp_servers.') && !server.url && !server.command) {
+        return send({ id, error: { code: -32600, message: 'failed to load configuration: invalid transport' } });
+      }
+    }
+    instructions = p.developerInstructions;
+    return respond(id, { thread: { id: threadId }, model: 'resolved-model', reasoningEffort: 'medium', serviceTier: 'default', cwd: process.cwd() });
+  }
   if (method === 'thread/inject_items') {
     if (fs.existsSync(path.join(__dirname, 'reject-instructions'))) return send({ id, error: { code: -32603, message: 'Test injection failure' } });
     instructions = p.items[0].content[0].text;
@@ -117,6 +126,24 @@ process.stdin.on('end', () => process.exit(0));
   return { dir, state, backend, calls, config };
 }
 const signal = () => new AbortController().signal;
+
+test('Codex starts and resumes with unavailable connector MCP tools explicitly disabled', async t => {
+  const f = setup(t);
+  for (const prompt of ['First message', 'Continue']) {
+    await f.backend('codex', prompt, 'conversation', signal(), '@owner:test');
+  }
+  const threads = f.calls().filter(c => c.method === 'thread/start' || c.method === 'thread/resume');
+  assert.deepEqual(threads.map(c => c.method), ['thread/start', 'thread/resume']);
+  assert.equal(threads[1].params.threadId, 'thread_1');
+  for (const thread of threads) {
+    for (const name of ['riftjack_publish', 'riftjack_tasks', 'riftjack_attachments', 'riftjack_rooms']) {
+      const server = thread.params.config['mcp_servers.' + name];
+      assert.equal(server.enabled, false);
+      assert.ok(server.url || server.command);
+      assert.equal(server.http_headers, undefined);
+    }
+  }
+});
 
 test('Codex refuses an unexpected resumed session before starting a turn', async t => {
   const f = setup(t);
