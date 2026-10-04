@@ -1,6 +1,7 @@
 import { startBackgroundMcp, BACKGROUND_SERVER, BACKGROUND_TOOL, backgroundInstructions } from './background-mcp.js';
 import { attachmentDelivery } from './attachment-delivery.js';
 import { startAttachmentMcp, ATTACHMENT_SERVER, ATTACHMENT_TOOL } from './attachment-mcp.js';
+import { startRoomMessageMcp, ROOM_MESSAGE_SERVER, ROOM_MESSAGE_TOOL, roomMessageInstructions } from './room-message-mcp.js';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { dirname } from 'node:path';
@@ -127,7 +128,7 @@ export function claudeApprovals(config: Config): boolean {
   return config.sandbox !== 'read-only' && config.claudeApprovalPolicy === 'on-request';
 }
 
-export function claudeArguments(config: Config, session?: string, interactive = false, instructions?: string, publication?: PublishConnection, background?: PublishConnection, media?: PublishConnection): string[] {
+export function claudeArguments(config: Config, session?: string, interactive = false, instructions?: string, publication?: PublishConnection, background?: PublishConnection, media?: PublishConnection, rooms?: PublishConnection): string[] {
   const readOnly = config.sandbox === 'read-only';
   const tools = readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash';
   const settings = {
@@ -139,7 +140,7 @@ export function claudeArguments(config: Config, session?: string, interactive = 
   const allowed = readOnly ? ['Read', 'Glob', 'Grep'] : [];
   const servers: Record<string, object> = {};
   for (const [name, connection, tool] of [[PUBLISH_SERVER, !readOnly && publication, PUBLISH_TOOL],
-    [BACKGROUND_SERVER, background, BACKGROUND_TOOL], [ATTACHMENT_SERVER, media, ATTACHMENT_TOOL]] as const) {
+    [BACKGROUND_SERVER, background, BACKGROUND_TOOL], [ATTACHMENT_SERVER, media, ATTACHMENT_TOOL], [ROOM_MESSAGE_SERVER, rooms, ROOM_MESSAGE_TOOL]] as const) {
     if (!connection) continue;
     servers[name] = { type: 'http', url: connection.url, headers: connection.headers, timeout: config.timeoutMs };
     allowed.push(tool);
@@ -205,10 +206,12 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
     let background: Awaited<ReturnType<typeof startBackgroundMcp>> | undefined;
     let publication: Awaited<ReturnType<typeof startPublishMcp>> | undefined;
     let media: Awaited<ReturnType<typeof startAttachmentMcp>> | undefined;
+    let rooms: Awaited<ReturnType<typeof startRoomMessageMcp>> | undefined;
     let delivery: ReturnType<typeof attachmentDelivery> | undefined;
     const mediaLifetime = new AbortController();
     try {
       if (hooks?.background) background = await startBackgroundMcp(hooks.background, signal);
+      if (hooks?.roomMessages) rooms = await startRoomMessageMcp(hooks.roomMessages, AbortSignal.any([signal, mediaLifetime.signal]));
       if (publish && interact && config.sandbox !== 'read-only') publication = await startPublishMcp(publish, signal);
       if (hooks?.sendAttachments) {
         delivery = attachmentDelivery(outbox, config.maxMediaBytes, async (files, callSignal) => {
@@ -219,7 +222,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
         media = await startAttachmentMcp(delivery.action, AbortSignal.any([signal, mediaLifetime.signal]));
       }
       await runClaude(config, claudeArguments(config, savedSession, interactive,
-        mediaInstructions(outbox, config.maxMediaBytes, !!media) + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : ''), publication, background, media), signal, (line, stdin) => {
+        mediaInstructions(outbox, config.maxMediaBytes, !!media) + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : ''), publication, background, media, rooms), signal, (line, stdin) => {
       let message: any;
       try { message = JSON.parse(line); } catch { throw new PublicError('Claude Code returned invalid stream-json output. Check its installed version.'); }
       if (typeof message.session_id === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(message.session_id)) {
@@ -272,7 +275,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       }
     }, input, interactive);
       await progress;
-    } finally { close(); mediaLifetime.abort(); await media?.close(); await progress.catch(() => {}); await background?.close(); await publication?.close(); }
+    } finally { close(); mediaLifetime.abort(); await media?.close(); await rooms?.close(); await progress.catch(() => {}); await background?.close(); await publication?.close(); }
     signal.throwIfAborted();
     if (result === undefined || !sessionId) throw new PublicError('Claude exited without a complete result and session ID. Please retry after checking its installed version.');
     const reply = parseMediaReply(result, outbox);

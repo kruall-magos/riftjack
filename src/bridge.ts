@@ -1,4 +1,6 @@
 import type { BackgroundAction } from './background-tasks.js';
+import { roomMessageDelivery, type MessageRequest } from './room-messages.js';
+import type { ToolAction } from './tool-mcp.js';
 import type { SendAttachments } from './attachment-delivery.js';
 import type { State } from './state.js';
 import { PublicError } from './accounts.js';
@@ -17,7 +19,7 @@ export type MatrixEvent = {
   content?: MediaContent & { 'm.mentions'?: { user_ids?: string[] }; 'm.relates_to'?: { rel_type?: string; event_id?: string; key?: string; 'm.in_reply_to'?: { event_id: string } } };
 };
 export type Mode = 'codex' | 'claude' | 'grok' | 'manager';
-export type BackendHooks = { background?: BackgroundAction; progress?: (text: string) => Promise<void>; sendAttachments?: SendAttachments };
+export type BackendHooks = { background?: BackgroundAction; progress?: (text: string) => Promise<void>; sendAttachments?: SendAttachments; roomMessages?: ToolAction };
 export type Backend = (mode: Mode, prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[], interact?: Interact, publish?: PublishAction, hooks?: BackendHooks) => Promise<string | BackendReply>;
 export type Steer = (prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[]) => Promise<boolean>;
 type Options = {
@@ -38,6 +40,7 @@ type Options = {
   status?: (key: string) => string;
   publish?: (input: unknown, signal: AbortSignal, interact: Interact, authorize: () => Promise<void>) => Promise<string>;
   background?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
+  roomMessages?: (request: MessageRequest, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
   // Account usage and limits of the engine.
   usage?: (signal: AbortSignal) => Promise<string>;
   report: (error: unknown) => void;
@@ -281,7 +284,16 @@ export class Bridge {
           }
           finally { current.publication = false; }
         } : undefined;
+        const messages = o.roomMessages && roomMessageDelivery((request, signal) =>
+          o.roomMessages!(request, { room, event: requestEvent, key: backendKey }, signal));
         const hooks: BackendHooks = {
+          roomMessages: messages ? async (input, callSignal) => {
+            const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
+            signal.throwIfAborted();
+            await this.authorize(room, current);
+            signal.throwIfAborted();
+            return messages(input, signal);
+          } : undefined,
           sendAttachments: o.sendAttachments ? async (files, callSignal) => {
             const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
             signal.throwIfAborted();

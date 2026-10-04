@@ -1,6 +1,7 @@
 import { startBackgroundMcp, BACKGROUND_SERVER, backgroundInstructions } from './background-mcp.js';
 import { attachmentDelivery } from './attachment-delivery.js';
 import { startAttachmentMcp, ATTACHMENT_SERVER } from './attachment-mcp.js';
+import { startRoomMessageMcp, ROOM_MESSAGE_SERVER, roomMessageInstructions } from './room-message-mcp.js';
 import { createHash } from 'node:crypto';
 import type { Config } from './config.js';
 import type { Backend, Steer } from './bridge.js';
@@ -57,10 +58,12 @@ export function createCodexBackend(configuration: Config | (() => Config), state
     let background: Awaited<ReturnType<typeof startBackgroundMcp>> | undefined;
     let publication: Awaited<ReturnType<typeof startPublishMcp>> | undefined;
     let media: Awaited<ReturnType<typeof startAttachmentMcp>> | undefined;
+    let rooms: Awaited<ReturnType<typeof startRoomMessageMcp>> | undefined;
     let delivery: ReturnType<typeof attachmentDelivery> | undefined;
     const mediaLifetime = new AbortController();
     try {
       if (hooks?.background) background = await startBackgroundMcp(hooks.background, signal);
+      if (hooks?.roomMessages) rooms = await startRoomMessageMcp(hooks.roomMessages, AbortSignal.any([signal, mediaLifetime.signal]));
       if (publish && interact && config.sandbox !== 'read-only') publication = await startPublishMcp(publish, signal);
       const outbox = await outboxDirectory(config.workspace, key);
       if (hooks?.sendAttachments) {
@@ -111,7 +114,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       }
       const session = state.session(key);
       const saved = session.codex;
-      const instructions = mediaInstructions(outbox, config.maxMediaBytes, !!media) + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '');
+      const instructions = mediaInstructions(outbox, config.maxMediaBytes, !!media) + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '');
       const instructionsHash = createHash('sha256').update(instructions).digest('hex');
       const options = {
         cwd: config.workspace, sandbox: config.sandbox, approvalPolicy: interact ? config.codexApprovalPolicy : 'never', approvalsReviewer: 'user', modelProvider: 'openai', model: config.codexModel,
@@ -134,6 +137,10 @@ export function createCodexBackend(configuration: Config | (() => Config), state
             tools: { send_attachments: { approval_mode: 'approve' } },
           } : { enabled: false },
           ...(config.codexReasoningEffort ? { model_reasoning_effort: config.codexReasoningEffort } : {}),
+          [`mcp_servers.${ROOM_MESSAGE_SERVER}`]: rooms ? { url: rooms.url, http_headers: rooms.headers,
+            required: true, enabled: true, tool_timeout_sec: Math.ceil(config.timeoutMs / 1000), enabled_tools: ['room_messages'],
+            tools: { room_messages: { approval_mode: 'approve' } },
+          } : { enabled: false },
         },
       };
       const thread = await server.request<{ thread: { id: string }; model?: string; reasoningEffort?: string | null; serviceTier?: string | null; cwd?: string }>(saved ? 'thread/resume' : 'thread/start', saved ? { ...options, threadId: saved, excludeTurns: true } : options);
@@ -172,6 +179,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       current.ended = true;
       mediaLifetime.abort();
       await media?.close();
+      await rooms?.close();
       await progress.catch(() => {});
       await background?.close(); await publication?.close();
       current.ready.resolve();

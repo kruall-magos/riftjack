@@ -1,5 +1,28 @@
 # One agent across private and shared rooms
 
+## Sending a message to a shared room
+
+Linked Codex and Claude agents have a `room_messages` MCP tool. With `action=list`
+it returns the shared rooms available to that agent. With `action=send`, provide
+`room`, `text` and a unique message `id`. The running connector sends the text
+using the bot's existing encrypted Matrix client and returns the Matrix event ID.
+The final response still goes to the conversation where the task began.
+
+Ask the agent to share a specific result or message. Private conversation details
+must only be shared with the human's explicit authorization. The destination must
+be a configured shared room for this agent; its participants, encryption and
+history visibility are checked again before sending. This tool cannot send to
+arbitrary rooms or another person's private chat.
+
+Text is literal, limited to 8000 UTF-8 bytes, and carries no agent mentions or
+private thread references. Reusing an ID with identical content during the same
+turn returns the earlier result, including a failure, without sending again.
+IDs are scoped to one turn; never automatically retry an uncertain delivery with
+a new ID or in a later turn. Inspect the destination first. The tool expires when
+the turn ends and permits at most 32 distinct message attempts per turn.
+
+## Session linking
+
 A linked agent continues one existing Codex or Claude session from its private
 chat and an explicitly allowed shared room. No history is copied into a new
 session. Each agent keeps its own session and processes one task at a time;

@@ -8,7 +8,8 @@ export type ToolDefinition = { name: string; description: string; inputSchema: o
 const record = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
 
 // A task-local Streamable HTTP MCP endpoint. No persistent config, public listener,
-// Matrix credentials, caller-selected conversation, or API for approving requests.
+// Matrix credentials or API for approving requests. Each action enforces its own
+// destination scope; exposing this transport never authorizes arbitrary rooms.
 export async function startToolMcp(tool: ToolDefinition, action: ToolAction, signal: AbortSignal, messages: { server: string; cancelled: string; failed: string }): Promise<ToolConnection & { close(): Promise<void> }> {
   signal.throwIfAborted();
   const token = Buffer.from('Bearer ' + randomBytes(32).toString('base64url'));

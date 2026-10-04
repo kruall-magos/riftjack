@@ -61,6 +61,7 @@ export class ConversationLinks {
   }
   agent(bot: string) { return this.config.agents.find(a => a.bot === bot); }
   room(bot: string, room: string) { return this.config.rooms.find(r => r.room === room && r.bots.includes(bot)); }
+  sharedRooms(bot: string): string[] { return this.config.rooms.filter(r => r.bots.includes(bot)).map(r => r.room); }
   private anchor(a: Agent) { return JSON.stringify([a.home, a.owner, a.thread ?? null]); }
   private assertSession(a: Agent) {
     const kind = this.accounts.find(account => account.userId === a.bot)!.kind as 'codex' | 'claude';

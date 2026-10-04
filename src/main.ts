@@ -1,3 +1,4 @@
+import { linkedRoomMessages } from './room-messages.js';
 import { withEngineSettings } from './engine-settings.js';
 import { parseBotSettingsRequest, manageBotSettings } from './bot-settings.js';
 import { BackgroundTasks } from './background-tasks.js';
@@ -245,6 +246,10 @@ async function main() {
       linkedSession: linkedAgent ? (room, event) => links.key(account.userId, room, event) : undefined,
       decoratePrompt: linkedAgent ? (room, event, prompt, steering) => links.prompt(account.userId, room, event, prompt, steering) : undefined,
       promptDelivered: linkedAgent ? () => links.acknowledge(account.userId) : undefined,
+      roomMessages: linkedAgent ? (request, context, signal) => linkedRoomMessages(links, account.userId, context, {
+        allowed: privateRoom, stopping: () => stopping || restart.pending,
+        send: (room, content) => client.sendMessage(room, content),
+      })(request, signal) : undefined,
       publish: (account.kind === 'codex' || account.kind === 'claude') && botConfig.sandbox !== 'read-only'
         ? (input, signal, interact, authorize) => requestPublish(input, botConfig.workspace, botConfig.dataDir, botConfig.maxMediaBytes, signal, interact, authorize) : undefined,
       background: background ? async (input, { room, event, key }, signal) => {

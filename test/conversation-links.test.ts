@@ -6,12 +6,47 @@ import { tmpdir } from 'node:os';
 import { ConversationLinks, isSharedRoomState } from '../src/conversation-links.js';
 import { State } from '../src/state.js';
 import { Bridge, sessionKey, type MatrixEvent } from '../src/bridge.js';
+import { linkedRoomMessages } from '../src/room-messages.js';
 
 const human = '@alice:test', bot = '@builder:test', peer = '@reviewer:test';
 const home = '!home:test', group = '!group:test';
 const message = (body: string, id = '$1', sender = human): MatrixEvent => ({ type: 'm.room.message',
   sender, event_id: id, origin_server_ts: 2000, content: { msgtype: 'm.text', body } });
 const canonical = sessionKey(home, message(''));
+
+test('outbound room messages enforce destination privacy and session binding without copying source metadata', async t => {
+  const f = fixture(t), signal = new AbortController().signal;
+  let live = roomState(), stopping = false, calls = 0, resetDuringCheck = false;
+  const event = message('Private instruction');
+  Object.assign(event.content!, { 'm.relates_to': { rel_type: 'm.thread', event_id: '$private' }, 'm.mentions': { user_ids: [peer] } });
+  const action = linkedRoomMessages(f.links, bot, { event, key: canonical }, {
+    stopping: () => stopping,
+    allowed: async (room, sender) => {
+      if (resetDuringCheck) f.state.reset(canonical);
+      return f.links.allowed(bot, room, sender, async () => live);
+    },
+    send: async (room, content) => {
+      calls++;
+      assert.equal(room, group);
+      assert.deepEqual(content, { msgtype: 'm.text', body: 'Public result.', 'm.mentions': { user_ids: [] } });
+      return '$sent';
+    },
+  });
+  assert.deepEqual(JSON.parse(await action({ action: 'list' }, signal)), { rooms: [group] });
+  const send = (room = group) => action({ action: 'send', room, text: 'Public result.', id: 'one' }, signal);
+  assert.equal(JSON.parse(await send()).event_id, '$sent');
+  for (const room of [home, '!unlisted:test']) await assert.rejects(send(room));
+  for (const membership of ['join', 'invite', 'knock']) {
+    live = [...roomState(), { type: 'm.room.member', state_key: '@extra:test', content: { membership } }];
+    await assert.rejects(send());
+    assert.deepEqual(JSON.parse(await action({ action: 'list' }, signal)), { rooms: [] });
+  }
+  live = roomState(); Object.assign(live[2].content, { history_visibility: 'shared' });
+  await assert.rejects(send());
+  live = roomState(); stopping = true; await assert.rejects(send());
+  stopping = false; resetDuringCheck = true; await assert.rejects(send());
+  assert.equal(calls, 1);
+});
 function roomState() {
   return [
     { type: 'm.room.encryption', state_key: '', content: { algorithm: 'm.megolm.v1.aes-sha2' } },
