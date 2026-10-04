@@ -20,7 +20,7 @@ export function deniedRequest(method: string): object | undefined {
   return undefined;
 }
 
-export function codexInteraction(request: ServerRequest, item?: Record<string, any>): Interaction | undefined {
+export function codexInteraction(request: ServerRequest, item?: Record<string, any>, allowPersistentRules = false): Interaction | undefined {
   const p = request.params;
   const deny = deniedRequest(request.method);
   if (!deny) return undefined;
@@ -28,7 +28,18 @@ export function codexInteraction(request: ServerRequest, item?: Record<string, a
   switch (request.method) {
     case 'item/commandExecution/requestApproval': {
       const command = p.command || item?.command;
-      const canApprove = typeof command === 'string' && command.length > 0 && (!p.availableDecisions || p.availableDecisions.includes('accept'));
+      const canApprove = typeof command === 'string' && command.trim().length > 0 &&
+        (p.availableDecisions == null || (Array.isArray(p.availableDecisions) && p.availableDecisions.includes('accept')));
+      // Only offer the server's exact proposed prefix, never derive one from
+      // shell text or accept an edited prefix in the human's answer.
+      const proposed = p.proposedExecpolicyAmendment;
+      const amendment: string[] | undefined = allowPersistentRules && typeof command === 'string' && command.trim() &&
+        (!p.kind || p.kind === 'command') && !p.networkApprovalContext &&
+        Array.isArray(proposed) && proposed.length && proposed.every(arg => typeof arg === 'string' && arg.length && !arg.includes('\0'))
+        ? [...proposed] : undefined;
+      const canRemember = amendment && (p.availableDecisions == null || (Array.isArray(p.availableDecisions) &&
+        p.availableDecisions.some(decision => record(decision) &&
+          JSON.stringify(decision.acceptWithExecpolicyAmendment?.execpolicy_amendment) === JSON.stringify(amendment))));
       return { ...confirmationDetails([
         { value: `Codex requests permission for a command${p.kind && p.kind !== 'command' ? ` (${p.kind})` : ''}.` },
         ...reason,
@@ -36,9 +47,16 @@ export function codexInteraction(request: ServerRequest, item?: Record<string, a
         { label: 'Working directory', value: String(p.cwd || item?.cwd || '[not provided]'), code: true },
         ...(p.networkApprovalContext ? [{ label: 'Network', value: json(p.networkApprovalContext), code: true }] : []),
         ...(p.additionalPermissions ? [{ label: 'Additional permissions', value: json(p.additionalPermissions), code: true }] : []),
-        { value: 'This request only; no permanent rule.' },
+        ...(canRemember ? [
+          { label: 'Proposed persistent command prefix (exact argument list)', value: json(amendment), code: true },
+          { value: 'Approve / ✅ allows this request only. Approve and remember also saves this prefix in Codex rules so future matching commands can run outside the sandbox without asking. The prefix is not restricted to this working directory and may affect other sessions and bots sharing the same Codex configuration.' },
+        ] : [{ value: 'This request only; no permanent rule.' }]),
       ]),
-      approve: canApprove ? { decision: 'accept' } : undefined, deny };
+      approve: canApprove ? { decision: 'accept' } : undefined, deny,
+      ...(canRemember && { answerLabel: 'Approve and remember', answerHint: 'remember', answer: (text: string) => {
+        if (text !== 'remember') throw new PublicError('Use the listed answer "remember" to approve and save exactly the displayed prefix, or approve once / decline.');
+        return { decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: [...amendment] } } };
+      } }) };
     }
     case 'item/fileChange/requestApproval':
       return { ...confirmationDetails([

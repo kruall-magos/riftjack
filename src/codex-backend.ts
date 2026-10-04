@@ -102,7 +102,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
         if (current.ended || !current.threadId || !current.turnId || p.threadId !== current.threadId || (p.turnId != null && p.turnId !== current.turnId)) return undefined;
         if (p.turnId == null && request.method !== 'mcpServer/elicitation/request') return undefined;
         if (config.codexApprovalPolicy === 'never' && request.method.endsWith('/requestApproval')) return undefined;
-        const question = codexInteraction(request, current.items.get(p.itemId));
+        const question = codexInteraction(request, current.items.get(p.itemId), sender === config.owner);
         if (!question) return undefined;
         return interact(question, AbortSignal.any([signal, requestSignal]));
       } : undefined);

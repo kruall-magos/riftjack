@@ -75,6 +75,10 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
       if (prompt.includes('[approval]')) return send({ id: 999, method: 'item/commandExecution/requestApproval', params: {} });
       if (prompt.includes('[confirm]')) {
         const params = { threadId: prompt.includes('[wrong-thread]') ? 'other' : threadId, turnId, itemId: 'command', command: 'echo approved', cwd: __dirname, availableDecisions: ['accept', 'decline'], reason: 'Test approval' };
+        if (prompt.includes('[remember]')) {
+          params.proposedExecpolicyAmendment = ['echo', 'approved'];
+          params.availableDecisions.push({ acceptWithExecpolicyAmendment: { execpolicy_amendment: params.proposedExecpolicyAmendment } });
+        }
         send({ id: 'approval-A', method: 'item/commandExecution/requestApproval', params });
         if (prompt.includes('[parallel]')) send({ id: 1001, method: 'item/commandExecution/requestApproval', params: { ...params, command: 'echo second' } });
         return;
@@ -519,6 +523,36 @@ for (const verb of ['approve', 'deny']) for (const withId of [true, false, 'reac
   assert.ok(f.calls().find(c => c.args).args.includes('approval_policy="on-request"'));
   assert.equal(f.calls().find(c => c.method === 'thread/start').params.approvalsReviewer, 'user');
   assert.deepEqual(f.errors, []);
+});
+
+test('Matrix remember sends the exact persistent decision once without steering or accepting foreign answers', async t => {
+  const f = confirming(t);
+  const task = f.bridge.handle('!dm:test', f.event('[confirm] [remember]'));
+  await until(() => f.confirmations().length === 1);
+  const text = `!answer ${f.id()} remember`;
+  await f.bridge.handle('!other:test', f.event(text));
+  await f.bridge.handle('!dm:test', { ...f.event(text), sender: '@stranger:test' });
+  await f.bridge.handle('!dm:test', { ...f.event(text), content: { msgtype: 'm.text', body: text,
+    'm.relates_to': { rel_type: 'm.thread', event_id: '$other-thread' } } });
+  assert.equal(f.calls().some(c => c.id === 'approval-A'), false);
+  await f.bridge.handle('!dm:test', f.event(text));
+  await task;
+  await f.bridge.handle('!dm:test', f.event(text));
+  assert.deepEqual(f.calls().filter(c => c.id === 'approval-A').map(c => c.result), [
+    { decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: ['echo', 'approved'] } } },
+  ]);
+  assert.equal(f.calls().filter(c => c.method === 'turn/steer').length, 0);
+  assert.deepEqual(f.errors, []);
+});
+
+test('a guest cannot save shared Codex rules even when the server proposes one', async t => {
+  const f = setup(t);
+  await f.backend('codex', '[confirm] [remember]', 'guest', signal(), '@guest:test', [], async request => {
+    assert.equal(request.answer, undefined);
+    assert.deepEqual(request.approve, { decision: 'accept' });
+    return request.deny;
+  });
+  assert.deepEqual(f.calls().find(c => c.id === 'approval-A').result, { decision: 'decline' });
 });
 
 test('another sender, room, thread, edited event, caption or old event cannot approve', async t => {

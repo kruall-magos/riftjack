@@ -151,7 +151,7 @@ test('explicit stale or unknown IDs never resolve a different single pending req
   pending.answer('!approve'); await current;
 });
 
-test('command and file approvals show concrete changes and never offer session or policy grants', () => {
+test('ordinary command and file approvals remain single-request grants', () => {
   const command = ask('item/commandExecution/requestApproval', { command: 'echo hello', cwd: '/workspace', availableDecisions: ['accept', 'acceptForSession'], proposedExecpolicyAmendment: ['echo'] });
   assert.match(command.text, /echo hello/);
   assert.deepEqual(command.approve, { decision: 'accept' });
@@ -162,6 +162,60 @@ test('command and file approvals show concrete changes and never offer session o
   assert.match(file.text, /old/); assert.match(file.text, /new/);
   assert.deepEqual(file.approve, { decision: 'accept' });
   assert.equal(ask('item/fileChange/requestApproval', {}).approve, undefined);
+});
+
+test('remembering a command requires the owner, a valid proposal and an available matching decision', () => {
+  const prefix = ['npm', 'run', 'test:http'];
+  const decision = { acceptWithExecpolicyAmendment: { execpolicy_amendment: prefix } };
+  const params = { command: 'npm run test:http', cwd: '/workspace', proposedExecpolicyAmendment: prefix };
+  const interaction = (overrides: Record<string, unknown> = {}, owner = true) => codexInteraction({
+    id: 1, method: 'item/commandExecution/requestApproval', params: { ...params, ...overrides },
+  }, undefined, owner)!;
+  for (const availableDecisions of [undefined, null, ['accept', 'decline', decision]]) {
+    const request = interaction({ availableDecisions });
+    assert.deepEqual(request.answer!('remember'), { decision });
+    assert.deepEqual(request.approve, { decision: 'accept' });
+    assert.match(request.text, /not restricted to this working directory/);
+    assert.match(request.text, /other sessions and bots/);
+    assert.ok(request.text.includes(JSON.stringify(prefix, null, 2)));
+    assert.throws(() => request.answer!('remember npm'), /exactly the displayed prefix/);
+    assert.throws(() => request.answer!('yes'), /listed answer/);
+  }
+  assert.equal(interaction({}, false).answer, undefined);
+  for (const proposedExecpolicyAmendment of [undefined, null, [], 'npm', ['npm', 1], [''], ['npm\0']]) {
+    assert.equal(interaction({ proposedExecpolicyAmendment }).answer, undefined);
+  }
+  for (const overrides of [
+    { command: '' }, { kind: 'stdin' }, { networkApprovalContext: { host: 'example.com', protocol: 'https' } },
+    { availableDecisions: [] }, { availableDecisions: ['accept', 'decline'] }, { availableDecisions: 'accept' },
+    { availableDecisions: [{ acceptWithExecpolicyAmendment: { execpolicy_amendment: ['npm'] } }] },
+  ]) assert.equal(interaction(overrides).answer, undefined);
+});
+
+test('remember is explicit, bound to a fully delivered confirmation, and never selected by approval reactions', async () => {
+  const prefix = ['npm', 'run', 'test:http'];
+  for (const choice of ['remember', 'approve', 'reaction', 'deny']) {
+    const pending = new Interactions();
+    const request = codexInteraction({ id: 1, method: 'item/commandExecution/requestApproval',
+      params: { command: 'npm run test:http', proposedExecpolicyAmendment: prefix } }, undefined, true)!;
+    const result = pending.ask(request, signal(), async (text, controls, markdown) => {
+      assert.match(pending.answer('!answer remember'), /still being delivered/);
+      assert.match(text, /Approve and remember: !answer [a-f0-9]{12} remember/);
+      assert.match(markdown, /Approve and remember: `\s*!answer [a-f0-9]{12} remember\s*`/);
+      assert.deepEqual(controls.keys, ['✅', '❌']);
+      controls.bind('$confirmation');
+    });
+    await Promise.resolve();
+    assert.match(pending.answer('!answer yes'), /listed answer/);
+    assert.equal(pending.size, 1);
+    if (choice === 'remember') pending.answer('!answer remember');
+    else if (choice === 'reaction') pending.react('$confirmation', '✅');
+    else pending.answer('!' + choice);
+    assert.deepEqual(await result, choice === 'remember'
+      ? { decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: prefix } } }
+      : { decision: choice === 'deny' ? 'decline' : 'accept' });
+    assert.match(pending.answer('!answer remember'), /No pending/);
+  }
 });
 
 test('permission grants are limited to the requested fields and current turn; decline grants nothing', () => {

@@ -26,12 +26,12 @@ export function confirmationDetails(details: Detail[]): { text: string; markdown
 }
 
 export function confirmationPrompt(id: string, request: {
-  text: string; markdown?: string; approve?: object; answer?: unknown; answerHint?: string;
+  text: string; markdown?: string; approve?: object; answer?: unknown; answerHint?: string; answerLabel?: string;
 }): { text: string; markdown: string } {
   const actions = [
     ...(request.approve !== undefined ? [{ label: '✅ Approve', command: `!approve ${id}` }] : []),
     { label: '❌ Decline', command: `!deny ${id}` },
-    ...(request.answer ? [{ label: 'Answer', command: `!answer ${id} ${request.answerHint || '<answer>'}` }] : []),
+    ...(request.answer ? [{ label: request.answerLabel || 'Answer', command: `!answer ${id} ${request.answerHint || '<answer>'}` }] : []),
   ];
   const hint = 'React below or send a command. ID optional when only one request is pending.';
   return {

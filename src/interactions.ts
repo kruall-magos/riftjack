@@ -11,6 +11,7 @@ export type Interaction = {
   deny: object;
   answer?: (text: string) => object;
   answerHint?: string;
+  answerLabel?: string;
 };
 export type Interact = (request: Interaction, signal: AbortSignal) => Promise<object>;
 // bind certifies full text delivery and binds controls to its final message.
