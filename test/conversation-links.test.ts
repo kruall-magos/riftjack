@@ -7,7 +7,7 @@ import { ConversationLinks, isSharedRoomState, MENTION_REPLY_LIMIT, mentionText,
 import { replyContent } from '../src/message-format.js';
 import { State } from '../src/state.js';
 import { linkedRoomMessages } from '../src/room-messages.js';
-import { AGENT_TRIGGER, Bridge, REPLY, SERVICE, sessionKey, type MatrixEvent } from '../src/bridge.js';
+import { AGENT_TRIGGER, Bridge, GRANT, REPLY, SERVICE, sessionKey, type MatrixEvent } from '../src/bridge.js';
 
 const human = '@alice:test', bot = '@builder:test', peer = '@reviewer:test';
 const home = '!home:test', group = '!group:test';
@@ -59,8 +59,34 @@ test('an outbound room message can mention the peer only with peer credit', asyn
   await assert.rejects(send('no-credit'), /no peer credit/);
   f.links.credit(bot);
   await send('paid');
-  // The text carries a visible mention; the credit itself is spent when the peer receives it.
-  assert.deepEqual(sent, [{ msgtype: 'm.text', body: 'Please review.\n\n' + peer, 'm.mentions': { user_ids: [peer] } }]);
+  // The credit is spent as the message is prepared; the grant travels with it.
+  assert.equal(f.links.peerCredit(bot), PEER_CREDIT - 1);
+  const [content] = sent as Record<string, unknown>[];
+  assert.equal(typeof content[GRANT], 'string');
+  assert.deepEqual({ ...content, [GRANT]: undefined }, { msgtype: 'm.text', body: 'Please review.\n\n' + peer, 'm.mentions': { user_ids: [peer] }, [GRANT]: undefined });
+  // More mentions than credit cannot be sent ahead of their delivery.
+  await send('second'); await send('third');
+  await assert.rejects(send('fourth'), /no peer credit/);
+  assert.equal(sent.length, 3);
+});
+
+test('peer credit is restored once per accepted human message, after access checks', async t => {
+  const f = pair(t);
+  let allowed = true, accepted = 0;
+  const bridge = new Bridge({ botId: bot, owner: human, kind: 'codex', state: f.state, since: 0, timeoutMs: 5000,
+    isAuthorized: id => id === human, isPrivateRoom: async () => allowed,
+    linkedSession: (room, event) => f.links.key(bot, room, event),
+    accepted: () => { accepted++; f.links.credit(bot); },
+    run: async () => 'done', reply: async () => {}, report: e => { throw e; },
+  });
+  await bridge.handle(home, message('Task', '$task'));
+  f.links.reserve(bot, group);
+  // A replayed event, a command or a message refused by access checks restores nothing.
+  await bridge.handle(home, message('Task', '$task'));
+  await bridge.handle(home, message('!status', '$status'));
+  allowed = false; await bridge.handle(home, message('Denied', '$denied'));
+  assert.equal(accepted, 1);
+  assert.equal(f.links.peerCredit(bot), PEER_CREDIT - 1);
 });
 function roomState() {
   return [
@@ -311,6 +337,12 @@ const mentioning = (body: string, id: string, sender: string, to: string[]): Mat
   Object.assign(event.content!, { 'm.mentions': { user_ids: to } });
   return event;
 };
+// A mention paid with the sender's credit when it is prepared, as the connector does.
+const paid = (links: ConversationLinks, body: string, id: string, sender: string, to: string[]): MatrixEvent => {
+  const event = mentioning(body, id, sender, to), grant = links.reserve(sender, group);
+  if (grant) Object.assign(event.content!, { [GRANT]: grant });
+  return event;
+};
 
 test('explicit peer mentions start a durable connector notice paid with peer credit', t => {
   const f = pair(t);
@@ -326,14 +358,21 @@ test('explicit peer mentions start a durable connector notice paid with peer cre
   const service = mentioning('Confirmation', '$svc', peer, [bot]); Object.assign(service.content!, { [SERVICE]: 'confirmation' });
   assert.equal(links.observe(bot, group, service), false);
   assert.equal(links.mention(bot, group, service), undefined);
-  const first = links.mention(bot, group, mentioning('Question', '$p1', peer, [bot]))!;
+  // An unpaid mention claiming credit the sender has is still refused.
+  assert.equal(links.mention(bot, group, mentioning('Unreserved', '$p-unreserved', peer, [bot])), undefined);
+  const forged = mentioning('Forged', '$p-forged', peer, [bot]); Object.assign(forged.content!, { [GRANT]: 'made-up' });
+  assert.equal(links.mention(bot, group, forged), undefined);
+  const question = paid(links, 'Question', '$p1', peer, [bot]);
+  // Paying happens when the message is prepared, before anyone receives it.
+  assert.equal(links.peerCredit(peer), PEER_CREDIT - 1);
+  const first = links.mention(bot, group, question)!;
   assert.equal(first.sender, human);
   assert.notEqual(first.event_id, '$p1');
   assert.deepEqual(first.content![AGENT_TRIGGER], { agent: peer, event: '$p1', events: [] });
   // The sender paid one; the recipient keeps the larger reserve: the sender's remainder.
   assert.deepEqual([links.peerCredit(peer), links.peerCredit(bot)], [PEER_CREDIT - 1, PEER_CREDIT - 1]);
   // Each agent evaluates a peer event once, and credit survives a restart.
-  assert.equal(links.mention(bot, group, mentioning('Question', '$p1', peer, [bot])), undefined);
+  assert.equal(links.mention(bot, group, question), undefined);
   links = f.load();
   assert.deepEqual([links.peerCredit(peer), links.peerCredit(bot)], [PEER_CREDIT - 1, PEER_CREDIT - 1]);
   const context = JSON.parse(links.prompt(bot, group, first, first.content!.body!).split('\n')[1]);
@@ -355,24 +394,32 @@ test('peer credit is restored, never accumulated, and every exchange without the
   let wakes = 0;
   for (let i = 0; i < 50; i++) {
     const [sender, recipient] = i % 2 ? [bot, peer] : [peer, bot];
-    if (links.mention(recipient, group, mentioning('Ping', '$ping' + i, sender, [recipient]))) wakes++;
+    if (links.mention(recipient, group, paid(links, 'Ping', '$ping' + i, sender, [recipient]))) wakes++;
   }
   assert.ok(wakes > 0 && wakes < 2 * PEER_CREDIT + 1);
   assert.deepEqual([links.peerCredit(peer), links.peerCredit(bot)], [0, 0]);
   // The recipient keeps the larger reserve, not the sum.
   links.credit(bot); links.credit(peer);
-  links.mention(bot, group, mentioning('Max', '$max', peer, [bot]));
+  links.mention(bot, group, paid(links, 'Max', '$max', peer, [bot]));
   assert.equal(links.peerCredit(bot), PEER_CREDIT);
   // A reserve expires a day after its human message; passing it on does not renew it.
   links.credit(peer, Date.now() - 23 * 3_600_000);
   assert.equal(links.peerCredit(peer), PEER_CREDIT);
   links.credit(peer, Date.now() - 25 * 3_600_000);
   assert.equal(links.peerCredit(peer), 0);
-  assert.equal(links.mention(bot, group, mentioning('Stale', '$stale', peer, [bot])), undefined);
+  assert.equal(links.reserve(peer, group), undefined);
+  assert.equal(links.mention(bot, group, paid(links, 'Stale', '$stale', peer, [bot])), undefined);
   // A sender without credit gets an explicit error instead of a silent mention.
   const refused = links.mentions(peer, group, 'Hi\n\n```matrix-mentions\n{"to":["' + bot + '"]}\n```')!;
   assert.deepEqual(refused.mentions, []);
   assert.match(refused.error!, /no peer credit/);
+  // A grant is consumed once and cannot be spent again after new human messages.
+  links.credit(peer);
+  const early = paid(links, 'Early', '$early', peer, [bot]);
+  links.credit(peer);
+  assert.ok(links.mention(bot, group, early));
+  assert.equal(links.mention(bot, group, { ...early, event_id: '$early-copy' }), undefined);
+  assert.equal(links.peerCredit(peer), PEER_CREDIT);
 });
 
 test('mention blocks are validated, removed and reported back to the agent', t => {
@@ -435,7 +482,7 @@ test('peer-started turns may stay silent, never steer and cannot be injected fro
   f.links.observe(bot, group, message('Task', '$h1'));
   f.links.credit(peer);
   let asked = 0;
-  const notice = () => f.links.mention(bot, group, mentioning('Question', '$p' + asked++, peer, [bot]))!;
+  const notice = () => f.links.mention(bot, group, paid(f.links, 'Question', '$p' + asked++, peer, [bot]))!;
   await bridge.handle(group, notice());
   assert.deepEqual(calls, []);
   await bridge.handleAgentMention(group, notice());
@@ -444,7 +491,7 @@ test('peer-started turns may stay silent, never steer and cannot be injected fro
   const replied = replies.length;
   f.links.observe(bot, group, message('Another task', '$h2'));
   f.links.credit(peer);
-  await bridge.handleAgentMention(group, f.links.mention(bot, group, mentioning('While busy', '$busy', peer, [bot]))!);
+  await bridge.handleAgentMention(group, f.links.mention(bot, group, paid(f.links, 'While busy', '$busy', peer, [bot]))!);
   await bridge.handle(group, message('Follow-up', '$after'));
   assert.equal(steers, 1); assert.equal(f.state.queued(bot), 1); assert.equal(replies.length, replied + 1);
   finish.release(); await task;
@@ -509,7 +556,7 @@ test('mentions trigger once per recipient in any delivery order and carry the wh
     const f = pair(t);
     f.links.observe(bot, group, message('Task', '$h1'));
     f.links.credit(peer);
-    const question = mentioning('Question', '$q', peer, [bot]);
+    const question = paid(f.links, 'Question', '$q', peer, [bot]);
     const starts = order.map(id => { f.links.observe(id, group, question); return f.links.mention(id, group, question); }).filter(Boolean);
     assert.equal(starts.length, 1);
   }
@@ -519,7 +566,7 @@ test('mentions trigger once per recipient in any delivery order and carry the wh
   f.links.observe(bot, group, part('x'.repeat(15_000), '$backlog', 'r0'));
   f.links.observe(bot, group, part('Earlier part. ', '$part1', 'r1'));
   f.links.credit(peer);
-  const last = mentioning('Please review the parser.', '$part2', peer, [bot]);
+  const last = paid(f.links, 'Please review the parser.', '$part2', peer, [bot]);
   Object.assign(last.content!, { [REPLY]: 'r1' });
   f.links.observe(bot, group, last);
   const notice = f.links.mention(bot, group, last)!;
@@ -537,7 +584,7 @@ test('mentions trigger once per recipient in any delivery order and carry the wh
   g.links.observe(bot, group, message('Task', '$h1'));
   g.links.observe(bot, group, part('IMPORTANT-FIRST-PART' + 'y'.repeat(9000), '$big1', 'r2'));
   g.links.credit(peer);
-  const tail = mentioning('Short question?', '$big2', peer, [bot]);
+  const tail = paid(g.links, 'Short question?', '$big2', peer, [bot]);
   Object.assign(tail.content!, { [REPLY]: 'r2' });
   g.links.observe(bot, group, tail);
   const partial = g.links.mention(bot, group, tail)!;

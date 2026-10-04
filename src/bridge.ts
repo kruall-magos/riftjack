@@ -17,11 +17,12 @@ import { feedbackMeaning, reactionFeedback, type ReactionReader } from './reacti
 // Connector-defined content fields. A trigger marks a turn started by a peer
 // agent's mention; it is created locally and never accepted from Matrix.
 // A reply ID is shared by the parts of one split reply.
-export const AGENT_TRIGGER = 'riftjack.trigger', SERVICE = 'riftjack.service', REPLY = 'riftjack.reply';
+// A grant is the ID of the peer credit paid for a mention.
+export const AGENT_TRIGGER = 'riftjack.trigger', SERVICE = 'riftjack.service', REPLY = 'riftjack.reply', GRANT = 'riftjack.grant';
 export type MatrixEvent = {
   type?: string; event_id?: string; sender?: string; origin_server_ts?: number; room_id?: string;
   content?: MediaContent & { 'm.mentions'?: { user_ids?: string[] }; 'm.relates_to'?: { rel_type?: string; event_id?: string; key?: string; 'm.in_reply_to'?: { event_id: string } };
-    [AGENT_TRIGGER]?: { agent: string; event: string; events?: string[] }; [SERVICE]?: unknown; [REPLY]?: unknown };
+    [AGENT_TRIGGER]?: { agent: string; event: string; events?: string[] }; [SERVICE]?: unknown; [REPLY]?: unknown; [GRANT]?: unknown };
 };
 export type Mentions = { text: string; mentions: string[]; error?: string };
 export type Mode = 'codex' | 'claude' | 'grok' | 'manager';
@@ -58,6 +59,9 @@ type Options = {
   // Shared rooms: the agent may decline a human message with NO_REPLY, so no
   // acknowledgement is sent before it decides.
   shared?: (room: string) => boolean;
+  // Called once for each newly accepted human message (not commands, reactions,
+  // notices or replays), after access and privacy checks.
+  accepted?: (room: string, event: MatrixEvent) => void;
 };
 function help(kind: Mode): string {
   return kind === 'manager' ? MANAGER_HELP : botHelp(kind);
@@ -148,7 +152,10 @@ export class Bridge {
     if (background) {
       if (this.active || this.stopped || o.isStopping?.() || (o.kind !== 'codex' && o.kind !== 'claude') ||
         o.state.session(o.linkedSession?.(room, event) ?? sessionKey(room, event))[o.kind] !== background.session || background.ready?.() === false) return;
-    } else if (!fromQueue && !o.state.claim(JSON.stringify([o.botId, event.event_id]))) return;
+    } else if (!fromQueue) {
+      if (!o.state.claim(JSON.stringify([o.botId, event.event_id]))) return;
+      if (!feedback && !event.content?.[AGENT_TRIGGER] && !prompt.startsWith('!')) o.accepted?.(room, event);
+    }
     // Attachments never execute conversation controls. Manager avatar captions are allowed explicitly below.
     const publishCommand = !media && /^!publish(?:\s|$)/.test(prompt);
     const restartSupervisor = !media && /^!restart\s+supervisor$/.test(prompt);

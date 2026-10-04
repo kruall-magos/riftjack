@@ -2,7 +2,8 @@ import { existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { Marked, type Token, type Tokens } from 'marked';
 import type { Account } from './accounts.js';
 import { PublicError } from './errors.js';
-import { AGENT_TRIGGER, REPLY, SERVICE, type MatrixEvent, type Mentions } from './bridge.js';
+import { randomUUID } from 'node:crypto';
+import { AGENT_TRIGGER, GRANT, REPLY, SERVICE, type MatrixEvent, type Mentions } from './bridge.js';
 import type { State } from './state.js';
 import { isPrivateRoomState } from './private-room.js';
 
@@ -18,8 +19,12 @@ type Delivery = Record<string, { members: string; cursor: Cursor; notes: number;
 type History = Record<string, { members: string; messages: Entry[]; next: number; seen: string[]; readers: Record<string, Cursor>;
   mentioned?: Record<string, string[]>; quoted?: Record<string, string[]>; notes?: Record<string, string[]> }>;
 // A local agent's reserve for starting its peer, and when the human message
-// it derives from arrived. Saved with the history under CREDITS_KEY.
+// it derives from arrived. A grant is one paid mention, reserved when the
+// message is prepared and consumed once by its recipient. Saved with the
+// history under CREDITS_KEY.
 type Credit = { level: number; since: number };
+type Grant = { from: string; to: string; room: string; level: number; since: number };
+type Credits = { agents: Record<string, Credit>; grants: Record<string, Grant> };
 const CREDITS_KEY = '#credits';
 type RoomState = Parameters<typeof isPrivateRoomState>[0];
 const matrixUser = (s: unknown): s is string => typeof s === 'string' && /^@[^\s:]+:[^\s]+$/.test(s);
@@ -58,7 +63,7 @@ export function isSharedRoomState(state: RoomState, members: string[]): boolean 
 export class ConversationLinks {
   private config: Configuration;
   private history: History;
-  private credits: Record<string, Credit>;
+  private credits: Credits;
   private deliveries = new Map<string, Delivery>();
   constructor(file: string, private historyFile: string, private accounts: Account[], private state: State, owner: string) {
     this.config = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : { version: 1, agents: [], rooms: [] };
@@ -88,19 +93,31 @@ export class ConversationLinks {
       }
     }
     const saved = existsSync(historyFile) ? JSON.parse(readFileSync(historyFile, 'utf8')) : {};
-    this.credits = saved[CREDITS_KEY] ?? {};
+    this.credits = saved[CREDITS_KEY] ?? { agents: {}, grants: {} };
     delete saved[CREDITS_KEY];
     this.history = saved;
   }
-  // A human message addressed to this agent restores its peer credit to the cap.
+  // A newly accepted human message to this agent restores its peer credit to the cap.
   credit(bot: string, now = Date.now()): void {
     if (!this.agent(bot)) return;
-    this.credits[bot] = { level: PEER_CREDIT, since: now };
+    this.credits.agents[bot] = { level: PEER_CREDIT, since: now };
     this.saveHistory();
   }
   peerCredit(bot: string, now = Date.now()): number {
-    const credit = this.credits[bot];
+    const credit = this.credits.agents[bot];
     return credit && now - credit.since < CREDIT_TTL_MS ? credit.level : 0;
+  }
+  // Spends one credit for a mention of the room's other agent while the message
+  // is being prepared. Returns the grant ID to send with it, or nothing.
+  reserve(bot: string, room: string, now = Date.now()): string | undefined {
+    const shared = this.room(bot, room), peer = shared?.bots.find(id => id !== bot), have = this.peerCredit(bot, now);
+    if (!peer || have < 1) return;
+    const since = this.credits.agents[bot].since, id = randomUUID();
+    this.credits.agents[bot] = { level: have - 1, since };
+    this.credits.grants = Object.fromEntries(Object.entries(this.credits.grants).filter(([, g]) => now - g.since < CREDIT_TTL_MS).slice(-99));
+    this.credits.grants[id] = { from: bot, to: peer, room, level: have - 1, since };
+    this.saveHistory();
+    return id;
   }
   agent(bot: string) { return this.config.agents.find(a => a.bot === bot); }
   room(bot: string, room: string) { return this.config.rooms.find(r => r.room === room && r.bots.includes(bot)); }
@@ -159,14 +176,13 @@ export class ConversationLinks {
     const mentioned = ((log.mentioned ??= {})[bot] ??= []);
     if (mentioned.includes(event.event_id)) return;
     log.mentioned[bot] = [...mentioned, event.event_id].slice(-1000);
-    // Only a local agent with credit can start its peer. It pays one; the peer
+    // Only a mention paid when it was prepared starts the peer, once. The peer
     // keeps the larger reserve, so a chain of mentions always runs out.
-    const now = Date.now(), have = this.peerCredit(event.sender, now);
-    const allowed = have >= 1 && !!this.agent(event.sender);
-    if (allowed) {
-      const since = this.credits[event.sender].since;
-      this.credits[event.sender] = { level: have - 1, since };
-      if (have - 1 > this.peerCredit(bot, now)) this.credits[bot] = { level: have - 1, since };
+    const now = Date.now(), id = content[GRANT], grant = typeof id === 'string' ? this.credits.grants[id] : undefined;
+    const allowed = !!grant && grant.from === event.sender && grant.to === bot && grant.room === room && now - grant.since < CREDIT_TTL_MS;
+    if (grant && allowed) {
+      delete this.credits.grants[id as string];
+      if (grant.level > this.peerCredit(bot, now)) this.credits.agents[bot] = { level: grant.level, since: grant.since };
     }
     this.saveHistory();
     if (!allowed) return;
@@ -212,11 +228,14 @@ export class ConversationLinks {
     this.saveHistory();
   }
   // Content fields for an outgoing message from this agent.
+  // A mention is paid here, as the message is sent; without credit left it is
+  // sent without the mention.
   outgoing<T extends { msgtype?: string }>(bot: string, room: string, content: T, mentions?: string[], reply?: string):
-    T & { [REPLY]?: string; 'm.mentions'?: { user_ids: string[] } } {
+    T & { [REPLY]?: string; [GRANT]?: string; 'm.mentions'?: { user_ids: string[] } } {
     if (!this.room(bot, room)) return content;
+    const grant = mentions?.length ? this.reserve(bot, room) : undefined;
     return { ...content, ...(content.msgtype === 'm.text' && reply && { [REPLY]: reply }),
-      ...(mentions?.length && { 'm.mentions': { user_ids: mentions } }) };
+      ...(grant && { 'm.mentions': { user_ids: mentions! }, [GRANT]: grant }) };
   }
   private saveHistory() {
     writeFileSync(this.historyFile + '.tmp', JSON.stringify({ ...this.history, [CREDITS_KEY]: this.credits }), { mode: 0o600 });

@@ -151,10 +151,14 @@ A received mention starts a separate turn for the mentioned agent:
   a message to one agent its reserve is 3; when it mentions its peer, both have 2.
   An exchange without new human messages therefore always runs out.
 - A reserve expires a day after the human message it comes from; passing it on
-  does not renew it. Credit is spent and saved before the turn is admitted, so
-  silent or failed turns count as well. The agent sees its reserve as
-  `peerCredit` in the routing context. A mention without credit is refused with an
-  error to the sender. Only agents of this installation have credit.
+  does not renew it. Only a newly accepted human message restores it: replays,
+  commands and messages refused by access checks do not. The sender pays when the
+  mentioning message is prepared, and the message carries a one-time grant; its
+  recipient is started only by an unused grant addressed to it, so mentions sent
+  ahead cannot spend credit restored later. Silent or failed turns count as well.
+  The agent sees its reserve as `peerCredit` in the routing context. A mention
+  without credit is refused with an error to the sender. Only agents of this
+  installation have credit.
 - Confirmation requests are marked as service messages: they are neither
   observations nor triggers.
 

@@ -35,6 +35,19 @@ test('room MCP authenticates, reports uncertain sends and does not replay them',
   await assert.rejects(post(server, 5));
 });
 
+test('room MCP advertises mention and passes it through validated', async t => {
+  const requests: unknown[] = [];
+  const server = await startRoomMessageMcp(roomMessageDelivery(async request => { requests.push(request); return '{"status":"sent"}'; }), new AbortController().signal);
+  t.after(() => server.close());
+  const tools = (await (await post(server, 1, {}, 'tools/list')).json()).result.tools;
+  assert.equal(tools[0].inputSchema.properties.mention.type, 'boolean');
+  assert.equal((await (await post(server, 2, { ...request, mention: true })).json()).result.isError, undefined);
+  // A mentioning text must fit whole into the notice that quotes it.
+  const long = (await (await post(server, 3, { ...request, id: 'long', text: 'x'.repeat(7000), mention: true })).json()).result;
+  assert.equal(long.isError, true);
+  assert.deepEqual(requests, [{ ...request, mention: true }]);
+});
+
 for (const kind of ['codex', 'claude'] as const) test(`${kind} sends room messages before replying and closes the tool on resumed turns`, { timeout: 25_000 }, async t => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'room-mcp-'))), cli = join(root, 'cli.cjs');
   t.after(() => rmSync(root, { recursive: true, force: true }));

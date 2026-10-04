@@ -258,6 +258,8 @@ async function main() {
       })(request, signal) : undefined,
       mentions: linkedAgent ? (room, text) => links.mentions(account.userId, room, text) : undefined,
       shared: linkedAgent ? room => !!links.room(account.userId, room) : undefined,
+      // A newly accepted human message to this agent restores its peer credit.
+      accepted: linkedAgent ? () => links.credit(account.userId) : undefined,
       publish: (account.kind === 'codex' || account.kind === 'claude') && botConfig.sandbox !== 'read-only'
         ? (input, signal, interact, authorize) => requestPublish(input, botConfig.workspace, botConfig.dataDir, botConfig.maxMediaBytes, signal, interact, authorize) : undefined,
       background: background ? async (input, { room, event, key }, signal) => {
@@ -389,11 +391,6 @@ async function main() {
           return;
         }
         if (!links.addressed(account.userId, room, event)) return;
-      }
-      // A new human message to this agent, here or in its own DM, restores its peer credit.
-      if (linkedAgent && event.type === 'm.room.message' && event.sender === linkedAgent.owner &&
-          (shared || room === linkedAgent.home) && Number.isFinite(event.origin_server_ts) && event.origin_server_ts! >= since) {
-        links.credit(account.userId);
       }
       // Serialize admission/observations, not model work: confirmations and
       // same-room steering must still get through while the agent is running.

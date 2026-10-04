@@ -1,7 +1,7 @@
 import { PublicError } from './errors.js';
 import type { ToolAction } from './tool-mcp.js';
 import type { ConversationLinks } from './conversation-links.js';
-import type { MatrixEvent } from './bridge.js';
+import { GRANT, type MatrixEvent } from './bridge.js';
 
 // mention: also start the other agent of that shared room, paid with peer credit.
 export type MessageRequest = { action: 'list' } | { action: 'send'; room: string; text: string; id: string; mention?: boolean };
@@ -11,7 +11,7 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
   context: { event: MatrixEvent; key: string }, transport: {
     allowed(room: string, sender: string): Promise<boolean>;
     stopping(): boolean;
-    send(room: string, content: { msgtype: 'm.text'; body: string; 'm.mentions': { user_ids: string[] } }): Promise<string>;
+    send(room: string, content: { msgtype: 'm.text'; body: string; 'm.mentions': { user_ids: string[] }; [GRANT]?: string }): Promise<string>;
   }): MessageAction {
   return async (request, signal) => {
     const allowed = async (target: string) => {
@@ -31,13 +31,15 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
       return JSON.stringify({ rooms });
     }
     await allowed(request.room);
-    // The credit is checked here and spent when the peer receives the mention.
+    // The mention is paid now; its grant lets the peer start exactly once.
     const peer = request.mention ? links.room(bot, request.room)!.bots.find(id => id !== bot) : undefined;
-    if (request.mention && links.peerCredit(bot) < 1) throw new PublicError('Room message withheld: no peer credit is left for a mention. It is restored when the human next writes to you; send without mention instead.');
+    const grant = request.mention ? links.reserve(bot, request.room) : undefined;
+    if (request.mention && !grant) throw new PublicError('Room message withheld: no peer credit is left for a mention. It is restored when the human next writes to you; send without mention instead.');
     // Use the running client's encryption state. Do not inherit private thread
     // relations, approvals or a human origin from the source room.
     const eventId = await transport.send(request.room, {
       msgtype: 'm.text', body: peer ? request.text + '\n\n' + peer : request.text, 'm.mentions': { user_ids: peer ? [peer] : [] },
+      ...(grant && { [GRANT]: grant }),
     });
     return JSON.stringify({ status: 'sent', room: request.room, event_id: eventId });
   };
