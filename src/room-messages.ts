@@ -3,7 +3,8 @@ import type { ToolAction } from './tool-mcp.js';
 import type { ConversationLinks } from './conversation-links.js';
 import type { MatrixEvent } from './bridge.js';
 
-export type MessageRequest = { action: 'list' } | { action: 'send'; room: string; text: string; id: string };
+// mention: also start the other agent of that shared room, paid with peer credit.
+export type MessageRequest = { action: 'list' } | { action: 'send'; room: string; text: string; id: string; mention?: boolean };
 export type MessageAction = (request: MessageRequest, signal: AbortSignal) => Promise<string>;
 
 export function linkedRoomMessages(links: ConversationLinks, bot: string,
@@ -30,10 +31,13 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
       return JSON.stringify({ rooms });
     }
     await allowed(request.room);
+    // The credit is checked here and spent when the peer receives the mention.
+    const peer = request.mention ? links.room(bot, request.room)!.bots.find(id => id !== bot) : undefined;
+    if (request.mention && links.peerCredit(bot) < 1) throw new PublicError('Room message withheld: no peer credit is left for a mention. It is restored when the human next writes to you; send without mention instead.');
     // Use the running client's encryption state. Do not inherit private thread
-    // relations, mentions, approvals or a human origin from the source room.
+    // relations, approvals or a human origin from the source room.
     const eventId = await transport.send(request.room, {
-      msgtype: 'm.text', body: request.text, 'm.mentions': { user_ids: [] },
+      msgtype: 'm.text', body: peer ? request.text + '\n\n' + peer : request.text, 'm.mentions': { user_ids: peer ? [peer] : [] },
     });
     return JSON.stringify({ status: 'sent', room: request.room, event_id: eventId });
   };
@@ -48,14 +52,15 @@ export function roomMessageDelivery(send: MessageAction): ToolAction {
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new PublicError('Expected a room message request.');
     const r = input as Record<string, unknown>;
     if (r.action === 'list' && Object.keys(r).length === 1) return send({ action: 'list' }, signal);
-    if (r.action !== 'send' || Object.keys(r).some(k => !['action', 'room', 'text', 'id'].includes(k)) ||
+    if (r.action !== 'send' || Object.keys(r).some(k => !['action', 'room', 'text', 'id', 'mention'].includes(k)) ||
         typeof r.room !== 'string' || !/^![^\s:]+:[^\s]+$/.test(r.room) ||
-        typeof r.text !== 'string' || !r.text.trim() || Buffer.byteLength(r.text, 'utf8') > 8000 ||
-        typeof r.id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(r.id)) {
-      throw new PublicError('Use action=list, or action=send with room, text (up to 8000 UTF-8 bytes), and a unique id (letters, digits, underscore or hyphen; up to 80 characters).');
+        typeof r.text !== 'string' || !r.text.trim() || Buffer.byteLength(r.text, 'utf8') > (r.mention ? 6000 : 8000) ||
+        typeof r.id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(r.id) || (r.mention !== undefined && typeof r.mention !== 'boolean')) {
+      // A mentioning message must fit whole into the notice that quotes it.
+      throw new PublicError('Use action=list, or action=send with room, text (up to 8000 UTF-8 bytes, or 6000 with mention), a unique id (letters, digits, underscore or hyphen; up to 80 characters) and optional mention (true to start the other agent).');
     }
-    const request: MessageRequest = { action: 'send', room: r.room, text: r.text, id: r.id };
-    const content = JSON.stringify([r.room, r.text]);
+    const request: MessageRequest = { action: 'send', room: r.room, text: r.text, id: r.id, ...(r.mention && { mention: true }) };
+    const content = JSON.stringify([r.room, r.text, !!r.mention]);
     const previous = attempts.get(r.id);
     if (previous) {
       if (previous.content !== content) throw new PublicError('This message id was already used with different content.');

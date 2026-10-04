@@ -369,7 +369,7 @@ async function main() {
         for (const [index, content] of contents.entries()) {
           if (!(await privateRoom(room, event.sender!))) throw new PublicError('Reply withheld because this is no longer an encrypted DM with an allowed account.');
           // Only the last part mentions a peer, after the complete reply is delivered.
-          await client.sendMessage(room, { ...links.outgoing(account.userId, room, event, content,
+          await client.sendMessage(room, { ...links.outgoing(account.userId, room, content,
             index === contents.length - 1 ? mentions : undefined, replyId), 'm.relates_to': replyTo });
         }
       },
@@ -381,14 +381,19 @@ async function main() {
         if (!Number.isFinite(event.origin_server_ts) || event.origin_server_ts! < since || !(await privateRoom(room, shared.owner))) return;
         links.observe(account.userId, room, event);
         // Other agents are heard as context, never impersonated as the controller.
-        // Only an explicit, budgeted mention starts a separate connector notice turn;
-        // each agent evaluates it once, whichever bot recorded the event first.
+        // Only an explicit mention paid with peer credit starts a separate connector
+        // notice turn; each agent evaluates it once, whichever bot recorded it first.
         if (event.sender !== shared.owner) {
           const mention = links.mention(account.userId, room, event);
           if (mention && bridge instanceof Bridge) void bridge.handleAgentMention(room, mention).catch(diagnostics);
           return;
         }
         if (!links.addressed(account.userId, room, event)) return;
+      }
+      // A new human message to this agent, here or in its own DM, restores its peer credit.
+      if (linkedAgent && event.type === 'm.room.message' && event.sender === linkedAgent.owner &&
+          (shared || room === linkedAgent.home) && Number.isFinite(event.origin_server_ts) && event.origin_server_ts! >= since) {
+        links.credit(account.userId);
       }
       // Serialize admission/observations, not model work: confirmations and
       // same-room steering must still get through while the agent is running.

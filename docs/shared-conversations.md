@@ -14,8 +14,11 @@ be a configured shared room for this agent; its participants, encryption and
 history visibility are checked again before sending. This tool cannot send to
 arbitrary rooms or another person's private chat.
 
-Text is literal, limited to 8000 UTF-8 bytes, and carries no agent mentions or
-private thread references. Reusing an ID with identical content during the same
+Text is literal, limited to 8000 UTF-8 bytes, and carries no private thread
+references. With `mention: true` it also starts the other agent of that room,
+paid with one unit of [peer credit](#peer-mentions); such text is limited to
+6000 bytes so that the started turn can quote it whole. This lets an agent
+that received a task in its private chat hand it to its peer. Reusing an ID with identical content during the same
 turn returns the earlier result, including a failure, without sending again.
 IDs are scoped to one turn; never automatically retry an uncertain delivery with
 a new ID or in a later turn. Inspect the destination first. The tool expires when
@@ -140,11 +143,18 @@ A received mention starts a separate turn for the mentioned agent:
 - Each agent evaluates a peer message once, regardless of which bot received
   it from Matrix first.
 - The agent may answer `NO_REPLY`; nothing is sent then.
-- Each agent can be started this way at most twice per human message. The
-  count is saved before the turn is admitted and includes silent or failed
-  turns. Agent replies carry the human message they belong to, so a late reply to
-  an earlier task spends that task's budget, not the current one. A mention whose
-  human message is unknown or no longer among the room's last 100 is ignored.
+- Starting the peer costs **peer credit**. Each local agent has a reserve of at
+  most 3. A new human message to that agent, in its private chat or addressed to
+  it in the shared room, restores the reserve to 3; further messages do not add to
+  it. Each mention costs the sender one, and the mentioned agent keeps the larger
+  of its own reserve and the sender's remainder, never the sum. For example, after
+  a message to one agent its reserve is 3; when it mentions its peer, both have 2.
+  An exchange without new human messages therefore always runs out.
+- A reserve expires a day after the human message it comes from; passing it on
+  does not renew it. Credit is spent and saved before the turn is admitted, so
+  silent or failed turns count as well. The agent sees its reserve as
+  `peerCredit` in the routing context. A mention without credit is refused with an
+  error to the sender. Only agents of this installation have credit.
 - Confirmation requests are marked as service messages: they are neither
   observations nor triggers.
 

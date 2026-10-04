@@ -2,7 +2,7 @@ import { existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { Marked, type Token, type Tokens } from 'marked';
 import type { Account } from './accounts.js';
 import { PublicError } from './errors.js';
-import { AGENT_TRIGGER, ORIGIN, REPLY, SERVICE, type MatrixEvent, type Mentions } from './bridge.js';
+import { AGENT_TRIGGER, REPLY, SERVICE, type MatrixEvent, type Mentions } from './bridge.js';
 import type { State } from './state.js';
 import { isPrivateRoomState } from './private-room.js';
 
@@ -12,17 +12,24 @@ type Configuration = { version: 1; agents: Agent[]; rooms: Room[] };
 type Entry = { seq: number; id: string; sender: string; role: 'human' | 'agent'; body: string; type: string; reply?: string };
 type Cursor = { seq: number; offset: number };
 type Delivery = Record<string, { members: string; cursor: Cursor; notes: number; quoted: string[] }>;
-// humans: recent human event IDs; budgets: peer-started turns per human message and agent;
 // mentioned: peer events each agent has already evaluated as a trigger;
 // quoted: messages an agent already received inside a mention notice;
 // notes: connector notices for an agent's next turn.
 type History = Record<string, { members: string; messages: Entry[]; next: number; seen: string[]; readers: Record<string, Cursor>;
-  humans?: string[]; budgets?: Record<string, Record<string, number>>; mentioned?: Record<string, string[]>;
-  quoted?: Record<string, string[]>; notes?: Record<string, string[]> }>;
+  mentioned?: Record<string, string[]>; quoted?: Record<string, string[]>; notes?: Record<string, string[]> }>;
+// A local agent's reserve for starting its peer, and when the human message
+// it derives from arrived. Saved with the history under CREDITS_KEY.
+type Credit = { level: number; since: number };
+const CREDITS_KEY = '#credits';
 type RoomState = Parameters<typeof isPrivateRoomState>[0];
 const matrixUser = (s: unknown): s is string => typeof s === 'string' && /^@[^\s:]+:[^\s]+$/.test(s);
 const matrixRoom = (s: unknown): s is string => typeof s === 'string' && /^![^\s:]+:[^\s]+$/.test(s);
-export const PEER_TURNS = 2;
+// Peer credit: a human message to an agent restores its reserve to the cap
+// (never adds to it); each mention of the peer costs one, and the peer keeps the
+// larger of its own reserve and the sender's remainder. A reserve expires a day
+// after the human message it comes from; passing it on does not renew it.
+export const PEER_CREDIT = 3;
+const CREDIT_TTL_MS = 24 * 3_600_000;
 // Longest quoted peer reply included with the turn it starts. Replies that
 // mention a peer are limited further, leaving room for Matrix formatting.
 const QUOTE_LIMIT = 8000;
@@ -51,6 +58,7 @@ export function isSharedRoomState(state: RoomState, members: string[]): boolean 
 export class ConversationLinks {
   private config: Configuration;
   private history: History;
+  private credits: Record<string, Credit>;
   private deliveries = new Map<string, Delivery>();
   constructor(file: string, private historyFile: string, private accounts: Account[], private state: State, owner: string) {
     this.config = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : { version: 1, agents: [], rooms: [] };
@@ -79,7 +87,20 @@ export class ConversationLinks {
         if (accounts.some(a => a.userId === bot) && !c.agents.some(a => a.bot === bot)) throw new PublicError('Every local participant in a shared room must have an explicit session link.');
       }
     }
-    this.history = existsSync(historyFile) ? JSON.parse(readFileSync(historyFile, 'utf8')) : {};
+    const saved = existsSync(historyFile) ? JSON.parse(readFileSync(historyFile, 'utf8')) : {};
+    this.credits = saved[CREDITS_KEY] ?? {};
+    delete saved[CREDITS_KEY];
+    this.history = saved;
+  }
+  // A human message addressed to this agent restores its peer credit to the cap.
+  credit(bot: string, now = Date.now()): void {
+    if (!this.agent(bot)) return;
+    this.credits[bot] = { level: PEER_CREDIT, since: now };
+    this.saveHistory();
+  }
+  peerCredit(bot: string, now = Date.now()): number {
+    const credit = this.credits[bot];
+    return credit && now - credit.since < CREDIT_TTL_MS ? credit.level : 0;
   }
   agent(bot: string) { return this.config.agents.find(a => a.bot === bot); }
   room(bot: string, room: string) { return this.config.rooms.find(r => r.room === room && r.bots.includes(bot)); }
@@ -118,10 +139,6 @@ export class ConversationLinks {
       role: event.sender === shared.owner ? 'human' : 'agent', body: content.body, type: content.msgtype!,
       ...(typeof content[REPLY] === 'string' && event.sender !== shared.owner && { reply: content[REPLY] }) });
     log.seen.push(event.event_id); log.seen = log.seen.slice(-10_000);
-    if (event.sender === shared.owner) {
-      log.humans = [...log.humans ?? [], event.event_id].slice(-100);
-      log.budgets = Object.fromEntries(Object.entries(log.budgets ?? {}).filter(([origin]) => log.humans!.includes(origin)));
-    }
     this.history[room] = log;
     this.saveHistory();
     return true;
@@ -130,17 +147,10 @@ export class ConversationLinks {
     const shared = this.config.rooms.find(r => r.room === room), log = this.history[room];
     return shared && log?.members === JSON.stringify([shared.owner, ...shared.bots.slice().sort()]) ? log : undefined;
   }
-  // The human message an outgoing reply belongs to, used to charge peer turns it causes.
-  origin(room: string, event: MatrixEvent): string | undefined {
-    const shared = this.config.rooms.find(r => r.room === room);
-    if (!shared) return;
-    const origin = event.content?.[ORIGIN];
-    return typeof origin === 'string' ? origin : event.sender === shared.owner ? event.event_id : undefined;
-  }
   // An observed peer message that explicitly mentions this agent becomes a
   // connector notice in the human's approval scope. Each agent evaluates a peer
-  // event once, independently of which bot recorded it first. The budget is
-  // spent and saved before the turn is admitted; silence and failures count as well.
+  // event once, independently of which bot recorded it first. The sender's credit
+  // is spent and saved before the turn is admitted; silence and failures count as well.
   mention(bot: string, room: string, event: MatrixEvent): MatrixEvent | undefined {
     const shared = this.room(bot, room), log = this.log(room), content = event.content;
     if (!shared || !log || !this.agent(bot) || !event.event_id || !event.sender || event.sender === bot || event.sender === shared.owner ||
@@ -149,12 +159,15 @@ export class ConversationLinks {
     const mentioned = ((log.mentioned ??= {})[bot] ??= []);
     if (mentioned.includes(event.event_id)) return;
     log.mentioned[bot] = [...mentioned, event.event_id].slice(-1000);
-    // Only a recent human message of this room can be charged. An unknown or
-    // expired origin is refused rather than spending the current task's budget.
-    const origin = content[ORIGIN];
-    const budget = typeof origin === 'string' && log.humans?.includes(origin) ? ((log.budgets ??= {})[origin] ??= {}) : undefined;
-    const allowed = !!budget && (budget[bot] ?? 0) < PEER_TURNS;
-    if (allowed) budget[bot] = (budget[bot] ?? 0) + 1;
+    // Only a local agent with credit can start its peer. It pays one; the peer
+    // keeps the larger reserve, so a chain of mentions always runs out.
+    const now = Date.now(), have = this.peerCredit(event.sender, now);
+    const allowed = have >= 1 && !!this.agent(event.sender);
+    if (allowed) {
+      const since = this.credits[event.sender].since;
+      this.credits[event.sender] = { level: have - 1, since };
+      if (have - 1 > this.peerCredit(bot, now)) this.credits[bot] = { level: have - 1, since };
+    }
     this.saveHistory();
     if (!allowed) return;
     // All parts of the mentioning reply travel with the notice, so the turn
@@ -169,7 +182,7 @@ export class ConversationLinks {
         + 'Otherwise reply with exactly NO_REPLY and nothing will be sent.\n' + JSON.stringify({ agent: event.sender, messageId: event.event_id,
           message: quoted.slice(-QUOTE_LIMIT), truncated }),
         // A truncated quote does not replace the observations; they stay unread in full.
-        [AGENT_TRIGGER]: { agent: event.sender, event: event.event_id, events: truncated ? [] : parts.map(entry => entry.id) }, [ORIGIN]: origin,
+        [AGENT_TRIGGER]: { agent: event.sender, event: event.event_id, events: truncated ? [] : parts.map(entry => entry.id) },
         ...(thread?.rel_type === 'm.thread' && typeof thread.event_id === 'string' && { 'm.relates_to': { rel_type: 'm.thread', event_id: thread.event_id } }) } };
   }
   // Removes the matrix-mentions block from a final shared-room reply and validates its recipients.
@@ -185,7 +198,8 @@ export class ConversationLinks {
     const error = blocks.length > 1 ? 'Mention not sent: use a single matrix-mentions block.'
       : rest.length > MENTION_REPLY_LIMIT ? `Mention not sent: a reply that mentions another agent must be at most ${MENTION_REPLY_LIMIT} characters.`
       : !Array.isArray(to) || !to.length || !to.every(id => typeof id === 'string') ? 'Mention not sent: the matrix-mentions block needs JSON like {"to":["@agent:example.com"]}.'
-      : !to.every(id => id !== bot && shared.bots.includes(id)) ? 'Mention not sent: only the other agent in this shared room can be mentioned.' : undefined;
+      : !to.every(id => id !== bot && shared.bots.includes(id)) ? 'Mention not sent: only the other agent in this shared room can be mentioned.'
+      : this.peerCredit(bot) < 1 ? 'Mention not sent: no peer credit is left. It is restored when the human next writes to you.' : undefined;
     if (error) { this.note(bot, room, error); return { text: rest, mentions: [], error }; }
     return { text: rest, mentions: [...new Set(to as string[])] };
   }
@@ -198,16 +212,14 @@ export class ConversationLinks {
     this.saveHistory();
   }
   // Content fields for an outgoing message from this agent.
-  outgoing<T extends { msgtype?: string }>(bot: string, room: string, event: MatrixEvent, content: T, mentions?: string[], reply?: string):
-    T & { [ORIGIN]?: string; [REPLY]?: string; 'm.mentions'?: { user_ids: string[] } } {
+  outgoing<T extends { msgtype?: string }>(bot: string, room: string, content: T, mentions?: string[], reply?: string):
+    T & { [REPLY]?: string; 'm.mentions'?: { user_ids: string[] } } {
     if (!this.room(bot, room)) return content;
-    const origin = this.origin(room, event);
-    return { ...content, ...(content.msgtype === 'm.text' && origin && { [ORIGIN]: origin }),
-      ...(content.msgtype === 'm.text' && reply && { [REPLY]: reply }),
+    return { ...content, ...(content.msgtype === 'm.text' && reply && { [REPLY]: reply }),
       ...(mentions?.length && { 'm.mentions': { user_ids: mentions } }) };
   }
   private saveHistory() {
-    writeFileSync(this.historyFile + '.tmp', JSON.stringify(this.history), { mode: 0o600 });
+    writeFileSync(this.historyFile + '.tmp', JSON.stringify({ ...this.history, [CREDITS_KEY]: this.credits }), { mode: 0o600 });
     renameSync(this.historyFile + '.tmp', this.historyFile);
   }
   acknowledge(bot: string): void {
@@ -277,10 +289,11 @@ export class ConversationLinks {
         + 'reply with exactly NO_REPLY and nothing will be sent.'
         + ' To ask the other agent here to respond, append exactly one fenced block with language matrix-mentions to your final reply, '
         + 'containing JSON like {"to":["@agent:example.com"]}. The connector removes it and sends a Matrix mention after the reply. '
-        + `Such a reply may have at most ${MENTION_REPLY_LIMIT} characters. Names and links do not start a turn. Each agent can be started this way at most ${PEER_TURNS} times per human message; use it only when a response is needed.` : '')
+        + `Such a reply may have at most ${MENTION_REPLY_LIMIT} characters. Names and links do not start a turn. Each mention costs one of your peer credits (peerCredit below, at most ${PEER_CREDIT}); `
+        + 'a human message to you restores them, and the mentioned agent receives your remainder. Use a mention only when a response is needed.' : '')
       + '\n' + JSON.stringify({ room, visibility: shared ? 'shared' : 'private', human: a.owner, author: trigger?.agent ?? event.sender,
         trigger: trigger ? 'agent-mention' : 'human-message', participants: shared ? [shared.owner, ...shared.bots] : [a.owner, bot],
-        unreadSharedMessages: unread, remainingMessages, ...(connectorNotes.length && { connectorNotes }) })
+        unreadSharedMessages: unread, remainingMessages, ...(shared && { peerCredit: this.peerCredit(bot) }), ...(connectorNotes.length && { connectorNotes }) })
       + (trigger ? '\nCurrent connector notice:\n' : '\nCurrent human message:\n') + prompt;
   }
 }
