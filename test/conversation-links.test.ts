@@ -15,6 +15,38 @@ const message = (body: string, id = '$1', sender = human): MatrixEvent => ({ typ
   sender, event_id: id, origin_server_ts: 2000, content: { msgtype: 'm.text', body } });
 const canonical = sessionKey(home, message(''));
 
+test('already-delivered status survives pruning and restart and distinguishes observations from quotes', t => {
+  for (const quoted of [false, true]) {
+    const f = pair(t); let links = f.links;
+    links.credit(peer);
+    const question = paid(links, 'Review question', '$review-question', peer, [bot]);
+    links.observe(bot, group, question);
+    const notice = links.mention(bot, group, question)!;
+    const earlier = quoted ? notice : message('Human turn', '$human-turn');
+    links.prompt(bot, group, earlier, earlier.content!.body!); links.acknowledge(bot);
+    links.prompt(peer, group, message('Peer turn', '$peer-turn'), 'Peer turn'); links.acknowledge(peer);
+    links = f.load();
+    const context = JSON.parse(links.prompt(bot, group, notice, notice.content!.body!).split('\n')[1]);
+    assert.equal(context.alreadyDelivered, quoted ? undefined : true);
+  }
+});
+
+test('a partially delivered question is not already delivered', t => {
+  const f = pair(t), links = f.links;
+  links.credit(peer);
+  const question = paid(links, 'Review question ' + 'x'.repeat(16000), '$review-long', peer, [bot]);
+  links.observe(bot, group, question);
+  const notice = links.mention(bot, group, question)!;
+  const first = JSON.parse(links.prompt(bot, group, message('First', '$first'), 'First').split('\n')[1]);
+  assert.equal(first.unreadSharedMessages[0].continues, true);
+  links.acknowledge(bot);
+  const partial = JSON.parse(links.prompt(bot, group, notice, notice.content!.body!).split('\n')[1]);
+  assert.equal(partial.alreadyDelivered, undefined);
+  links.prompt(bot, group, message('Second', '$second'), 'Second'); links.acknowledge(bot);
+  const full = JSON.parse(links.prompt(bot, group, notice, notice.content!.body!).split('\n')[1]);
+  assert.equal(full.alreadyDelivered, true);
+});
+
 test('outbound room messages enforce destination privacy and session binding without copying source metadata', async t => {
   const f = fixture(t), signal = new AbortController().signal;
   let live = roomState(), stopping = false, calls = 0, resetDuringCheck = false;
