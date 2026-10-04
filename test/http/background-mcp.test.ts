@@ -26,6 +26,25 @@ test('background MCP has scoped authentication and closes at the end of the task
   await assert.rejects(post(server.headers.Authorization, 3));
 });
 
+test('background MCP advertises and schedules delayed messages', async t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'background-mcp-timer-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const queue = new BackgroundTasks(join(root, 'watches.json'), root);
+  const target = { room: '!room:test', sender: '@alice:test', key: 'key', session: 'session' };
+  const lifetime = new AbortController();
+  const server = await startBackgroundMcp(async (request, signal) => queue.action(request, target, signal), lifetime.signal);
+  t.after(() => server.close());
+  const call = async (id: number, method: string, params?: object) => (await (await fetch(server.url, { method: 'POST',
+    headers: { ...server.headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id, method, params }) })).json());
+  const tools = await call(1, 'tools/list');
+  assert.ok(tools.result.tools[0].inputSchema.properties.action.enum.includes('remind'));
+  const scheduled = JSON.parse((await call(2, 'tools/call', { name: 'background_tasks',
+    arguments: { action: 'remind', label: 'Later', message: 'Check the build.', deliver: 'room', delay_minutes: 30 } })).result.content[0].text);
+  assert.deepEqual([scheduled.room, scheduled.message, scheduled.state], ['!room:test', 'Check the build.', 'waiting']);
+  const listed = JSON.parse((await call(3, 'tools/call', { name: 'background_tasks', arguments: { action: 'list' } })).result.content[0].text);
+  assert.deepEqual(listed.map((w: { id: string; kind: string }) => [w.id, w.kind]), [[scheduled.id, 'timer']]);
+});
+
 for (const kind of ['codex', 'claude'] as const) test(`${kind} registers through MCP and resumes the same session after completion`, { timeout: 20_000 }, async t => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'background-mcp-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));

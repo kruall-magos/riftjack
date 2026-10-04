@@ -190,3 +190,43 @@ test('timer input is bounded and cancellable, and a late timer arrives with its 
   assert.match(late[0], /^Hello\n\n\(Scheduled for .*; delivered 6\d minutes late\.\)$/);
   assert.match(f.queue.summary(target.key, target.session), /0 timers pending/);
 });
+
+test('finished timers are pruned so the saved state always loads again', async t => {
+  const f = setup(t);
+  for (let i = 0; i < 201; i++) {
+    const { id } = JSON.parse(f.queue.action({ action: 'remind', label: 'Loop', message: 'x', deliver: 'room', delay_minutes: 5 }, target, signal()));
+    f.queue.action({ action: 'cancel', id }, target, signal());
+  }
+  assert.ok(JSON.parse(new BackgroundTasks(f.file, f.root).action({ action: 'list' }, target, signal())).length <= 100);
+});
+
+test('a timer cancelled, reset or revoked during the room check is not sent', async t => {
+  for (const change of ['cancel', 'reset'] as const) {
+    const f = setup(t);
+    let valid = true, release!: () => void;
+    const { id } = JSON.parse(f.queue.action({ action: 'remind', label: 'Race', message: 'x', deliver: 'room', delay_minutes: 5 }, target, signal()));
+    const sent: string[] = [];
+    const pump = f.queue.pump({ valid: () => valid, report, deliver: async () => false,
+      // Mirrors the connector: await the privacy check, then recheck before admission.
+      post: async (_t, text, admit, ready) => {
+        await new Promise<void>(r => { release = r; });
+        if (!ready()) return false;
+        admit(); sent.push(text); return true;
+      } }, Date.now() + 6 * 60_000);
+    await new Promise(r => setImmediate(r));
+    if (change === 'cancel') assert.equal(JSON.parse(f.queue.action({ action: 'cancel', id }, target, signal())).state, 'cancelled');
+    else valid = false;
+    release(); await pump;
+    assert.deepEqual(sent, []);
+  }
+  // The agent path rechecks the same condition before admitting the turn.
+  const f = setup(t), state = new State(join(f.root, 'state.json'));
+  state.update(target.key, { codex: target.session });
+  let runs = 0;
+  const bridge = new Bridge({ botId: '@bot:test', owner: target.sender, kind: 'codex', state, since: 0, timeoutMs: 1000,
+    isAuthorized: () => true, isPrivateRoom: async () => true, reply: async () => {}, report,
+    run: async () => { runs++; return 'done'; } });
+  const timerEvent: MatrixEvent = { ...event, event_id: '$timer', content: { ...event.content!, body: 'Reminder' } };
+  assert.equal(await bridge.resumeBackground(target.room, timerEvent, target.session, () => assert.fail('Must not admit'), () => false), false);
+  assert.equal(runs, 0);
+});

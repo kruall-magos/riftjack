@@ -99,10 +99,11 @@ export class Bridge {
     await this.handleMessage(room, event, true);
   }
 
-  async resumeBackground(room: string, event: MatrixEvent, session: string, admitted: () => void): Promise<boolean> {
+  // `ready` is rechecked synchronously right before admission, after the privacy check.
+  async resumeBackground(room: string, event: MatrixEvent, session: string, admitted: () => void, ready?: () => boolean): Promise<boolean> {
     if (this.busy || this.stopped || this.options.isStopping?.()) return false;
     let accepted = false;
-    await this.handleMessage(room, event, true, { session, admitted: () => { admitted(); accepted = true; } });
+    await this.handleMessage(room, event, true, { session, ready, admitted: () => { admitted(); accepted = true; } });
     return accepted;
   }
 
@@ -120,7 +121,7 @@ export class Bridge {
     } finally { this.draining = false; }
   }
 
-  private async handleMessage(room: string, event: MatrixEvent, feedback = false, background?: { session: string; admitted: () => void }, fromQueue = false, batch: MatrixEvent[] = []): Promise<void> {
+  private async handleMessage(room: string, event: MatrixEvent, feedback = false, background?: { session: string; admitted: () => void; ready?: () => boolean }, fromQueue = false, batch: MatrixEvent[] = []): Promise<void> {
     // A watch is lower priority than a human message arriving during its
     // privacy check. It must not reserve the human admission queue.
     if (background) return this.acceptMessage(room, event, feedback, background, fromQueue, batch, () => {});
@@ -132,7 +133,7 @@ export class Bridge {
     finally { admitted(); }
   }
 
-  private async acceptMessage(room: string, event: MatrixEvent, feedback: boolean, background: { session: string; admitted: () => void } | undefined,
+  private async acceptMessage(room: string, event: MatrixEvent, feedback: boolean, background: { session: string; admitted: () => void; ready?: () => boolean } | undefined,
     fromQueue: boolean, batch: MatrixEvent[], admitted: () => void): Promise<void> {
     const o = this.options;
     if (!event.sender || !o.isAuthorized(event.sender) || event.sender === o.botId) return;
@@ -146,7 +147,7 @@ export class Bridge {
     if (!prompt || !(await o.isPrivateRoom(room, event.sender)) || !o.isAuthorized(event.sender)) return;
     if (background) {
       if (this.active || this.stopped || o.isStopping?.() || (o.kind !== 'codex' && o.kind !== 'claude') ||
-        o.state.session(o.linkedSession?.(room, event) ?? sessionKey(room, event))[o.kind] !== background.session) return;
+        o.state.session(o.linkedSession?.(room, event) ?? sessionKey(room, event))[o.kind] !== background.session || background.ready?.() === false) return;
     } else if (!fromQueue && !o.state.claim(JSON.stringify([o.botId, event.event_id]))) return;
     // Attachments never execute conversation controls. Manager avatar captions are allowed explicitly below.
     const publishCommand = !media && /^!publish(?:\s|$)/.test(prompt);
