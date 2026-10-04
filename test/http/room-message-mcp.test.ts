@@ -65,7 +65,8 @@ async function work(){
   if(value.isError) throw Error(value.content[0].text);
   return JSON.parse(value.content[0].text);
  }
- if((await call(1,{action:'list'})).rooms[0]!=='!shared:test') throw Error('Missing room');
+ const listed=(await call(1,{action:'list'})).rooms;
+ if(listed[0].room!=='!shared:test'||listed[0].type!=='shared'||listed[1].type!=='private') throw Error('Missing room');
  for(const id of [2,3]) if((await call(id,${JSON.stringify(request)})).event_id!=='$sent') throw Error('Missing receipt');
  fs.writeFileSync(__filename+'.completed','yes');
  return 'Delivered.';
@@ -107,7 +108,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',async 
     report: () => {}, reply: async (room, _event, text) => { assert.equal(room, '!home:test'); order.push(text); },
     roomMessages: async (request, context) => {
       assert.equal(context.room, '!home:test');
-      if (request.action === 'list') return JSON.stringify({ rooms: ['!shared:test'] });
+      if (request.action === 'list') return JSON.stringify({ rooms: [{ room: '!shared:test', type: 'shared' }, { room: '!home:test', type: 'private' }] });
       assert.equal(request.room, '!shared:test');
       assert.throws(() => readFileSync(cli + '.completed'));
       order.push(request.text);

@@ -3,16 +3,17 @@
 ## Sending a message to a shared room
 
 Linked Codex and Claude agents have a `room_messages` MCP tool. With `action=list`
-it returns the shared rooms available to that agent. With `action=send`, provide
+it returns the shared rooms available to that agent and its own private chat with
+the human, each with its `type`. With `action=send`, provide
 `room`, `text` and a unique message `id`. The running connector sends the text
 using the bot's existing encrypted Matrix client and returns the Matrix event ID.
 The final response still goes to the conversation where the task began.
 
 Ask the agent to share a specific result or message. Private conversation details
 must only be shared with the human's explicit authorization. The destination must
-be a configured shared room for this agent; its participants, encryption and
-history visibility are checked again before sending. This tool cannot send to
-arbitrary rooms or another person's private chat.
+be a configured shared room for this agent or its own private chat with the same
+human; participants, encryption and history visibility are checked again before
+sending. This tool cannot send to arbitrary rooms or another person's private chat.
 
 The list also contains the agent's own private chat with the same human
 (`"type": "private"`). It lets an agent return a result the human asked for in
