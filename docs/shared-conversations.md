@@ -14,6 +14,12 @@ be a configured shared room for this agent; its participants, encryption and
 history visibility are checked again before sending. This tool cannot send to
 arbitrary rooms or another person's private chat.
 
+The list also contains the agent's own private chat with the same human
+(`"type": "private"`). It lets an agent return a result the human asked for in
+that chat when the result arrives in a shared room, for example a peer's answer.
+It is not meant for copying shared conversations there. The chat must still be
+an encrypted DM with only the human and the bot; mentions are refused there.
+
 Text is literal, limited to 8000 UTF-8 bytes, and carries no private thread
 references. With `mention: true` it also starts the other agent of that room,
 paid with one unit of [peer credit](#peer-mentions); such text is limited to

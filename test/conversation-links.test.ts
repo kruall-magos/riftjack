@@ -33,7 +33,7 @@ test('outbound room messages enforce destination privacy and session binding wit
       return '$sent';
     },
   });
-  assert.deepEqual(JSON.parse(await action({ action: 'list' }, signal)), { rooms: [group] });
+  assert.deepEqual(JSON.parse(await action({ action: 'list' }, signal)), { rooms: [{ room: group, type: 'shared' }] });
   const send = (room = group) => action({ action: 'send', room, text: 'Public result.', id: 'one' }, signal);
   assert.equal(JSON.parse(await send()).event_id, '$sent');
   for (const room of [home, '!unlisted:test']) await assert.rejects(send(room));
@@ -47,6 +47,26 @@ test('outbound room messages enforce destination privacy and session binding wit
   live = roomState(); stopping = true; await assert.rejects(send());
   stopping = false; resetDuringCheck = true; await assert.rejects(send());
   assert.equal(calls, 1);
+});
+
+test('an agent can return a result to its own private chat, but not mention anyone there', async t => {
+  const f = fixture(t), signal = new AbortController().signal, sent: [string, object][] = [];
+  const privateState = roomState().filter(e => e.state_key !== peer);
+  let homePrivate = true;
+  const action = linkedRoomMessages(f.links, bot, { event: message('Ask the reviewer'), key: canonical }, {
+    stopping: () => false,
+    allowed: (room, sender) => f.links.allowed(bot, room, sender, async () => room === home ? (homePrivate ? privateState : roomState()) : roomState()),
+    send: async (room, content) => { sent.push([room, content]); return '$sent'; },
+  });
+  assert.deepEqual(JSON.parse(await action({ action: 'list' }, signal)).rooms, [{ room: group, type: 'shared' }, { room: home, type: 'private' }]);
+  await action({ action: 'send', room: home, text: 'The reviewer found nothing.', id: 'result' }, signal);
+  assert.deepEqual(sent, [[home, { msgtype: 'm.text', body: 'The reviewer found nothing.', 'm.mentions': { user_ids: [] } }]]);
+  f.links.credit(bot);
+  await assert.rejects(action({ action: 'send', room: home, text: 'Wake?', id: 'wake', mention: true }, signal), /only for the other agent/);
+  // A private chat that gained another member is no longer a destination.
+  homePrivate = false;
+  await assert.rejects(action({ action: 'send', room: home, text: 'Leak?', id: 'leak' }, signal), /withheld/);
+  assert.equal(sent.length, 1);
 });
 
 test('an outbound room message can mention the peer only with peer credit', async t => {

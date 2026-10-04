@@ -14,22 +14,26 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
     send(room: string, content: { msgtype: 'm.text'; body: string; 'm.mentions': { user_ids: string[] }; [GRANT]?: string }): Promise<string>;
   }): MessageAction {
   return async (request, signal) => {
+    // The agent's own DM with the same human is also a destination, so a result
+    // that arrived in a shared room can be returned where the human asked for it.
+    const home = links.agent(bot)?.home;
     const allowed = async (target: string) => {
       signal.throwIfAborted();
-      const linked = () => !!links.room(bot, target) && links.key(bot, target, context.event) === context.key && !transport.stopping();
+      const linked = () => (target === home || !!links.room(bot, target)) && links.key(bot, target, context.event) === context.key && !transport.stopping();
       if (!linked() || !(await transport.allowed(target, context.event.sender!)) || !linked()) {
         throw new PublicError('Room message withheld: destination access, membership or privacy changed.');
       }
       signal.throwIfAborted();
     };
     if (request.action === 'list') {
-      const rooms: string[] = [];
-      for (const target of links.sharedRooms(bot)) {
-        try { await allowed(target); rooms.push(target); }
+      const rooms: { room: string; type: 'shared' | 'private' }[] = [];
+      for (const target of [...links.sharedRooms(bot), ...home ? [home] : []]) {
+        try { await allowed(target); rooms.push({ room: target, type: target === home ? 'private' : 'shared' }); }
         catch { signal.throwIfAborted(); }
       }
       return JSON.stringify({ rooms });
     }
+    if (request.mention && request.room === home) throw new PublicError('Room message withheld: mention is only for the other agent of a shared room.');
     await allowed(request.room);
     // The mention is paid now; its grant lets the peer start exactly once.
     const peer = request.mention ? links.room(bot, request.room)!.bots.find(id => id !== bot) : undefined;
