@@ -157,6 +157,10 @@ async function main() {
   async function startAccount(account: Account) {
     if (clients.has(account.userId)) return;
     if (stopping) throw new PublicError('Connector is shutting down. Restart it to bring the new bot online.');
+    // Startup phase durations, logged once the bot is online.
+    const startedAt = performance.now(), phases: Record<string, number> = {};
+    let phaseStart = startedAt;
+    const phase = (name: string) => { const now = performance.now(); phases[name] = Math.round(now - phaseStart); phaseStart = now; };
     const botConfig = configForWorkspace(config, account.workspace);
     const currentConfig = () => withEngineSettings(botConfig, accounts.list().find(a => a.userId === account.userId) ?? account);
     const backend = createBackend(currentConfig, state);
@@ -172,7 +176,9 @@ async function main() {
       accessToken: account.accessToken, maxBytes: config.maxMediaBytes, scope: account.userId,
       uploadTimeoutMs: config.mediaUploadTimeoutMs,
       reportUpload: measurement => console.log(JSON.stringify({ time: new Date().toISOString(), ...measurement })) });
+    phase('storage');
     const me = await client.getWhoAmI();
+    phase('whoami');
     if (me.user_id !== account.userId || !me.device_id) throw new PublicError('Bot ' + account.userId + ' needs its own device-bound Matrix access token.');
     const authorized = (sender: string) => access.has(sender, account.kind === 'manager' ? undefined : account.userId);
     const linkedAgent = links.agent(account.userId);
@@ -424,7 +430,9 @@ async function main() {
         });
         accounts.setRoom(account.userId, roomId);
       }
+      phase('setup');
       await client.crypto.prepare();
+      phase('cryptoPrepare');
       try {
         await ensureDeviceIdentity(client, account.userId, join(dir, 'device-recovery.json'));
         console.log(account.name + ': device cross-signing verified.');
@@ -432,9 +440,14 @@ async function main() {
         console.warn(account.name + ': device verification incomplete; encrypted messaging remains available.');
         diagnostics(error);
       }
+      phase('deviceIdentity');
       await client.start();
+      // start() launches the sync loop without waiting for the first /sync response.
+      phase('clientStart');
       online = true;
       console.log(account.name + ' (' + account.kind + ') online: ' + account.userId);
+      console.log(JSON.stringify({ time: new Date().toISOString(), event: 'bot-startup', bot: account.userId,
+        totalMs: Math.round(performance.now() - startedAt), phases }));
     } catch (error) { client.stop(); clients.delete(account.userId); workers.get(account.userId)?.stop(); workers.delete(account.userId); workerServer.remove(account.userId); throw error; }
   }
   for (const account of accounts.list()) {
@@ -443,6 +456,9 @@ async function main() {
   starting = false;
   if (!clients.size) throw new PublicError('No bots could start. Check credentials, encryption support, and homeserver connectivity.');
   if (config.workerPort) await workerServer.start(config.workerPort);
+  // Time since process start, including module loading.
+  console.log(JSON.stringify({ time: new Date().toISOString(), event: 'connector-startup',
+    bots: clients.size, elapsedMs: Math.round(performance.now()) }));
   notifySupervisor({ type: 'connector-ready' });
   const notifyRestart = async () => {
     if (stopping || restart.pending || notifyingRestart) return;
