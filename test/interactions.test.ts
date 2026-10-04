@@ -169,7 +169,8 @@ test('ordinary command and file approvals remain single-request grants', () => {
 test('remembering a command requires the owner, a valid proposal and an available matching decision', () => {
   const prefix = ['npm', 'run', 'test:http'];
   const decision = { acceptWithExecpolicyAmendment: { execpolicy_amendment: prefix } };
-  const params = { command: 'npm run test:http', cwd: '/workspace', proposedExecpolicyAmendment: prefix };
+  const params = { command: 'npm run test:http', cwd: '/workspace', proposedExecpolicyAmendment: prefix,
+    reason: `Assessed permission scope.\nRiftjack-Persist: ${JSON.stringify(prefix)}` };
   const interaction = (overrides: Record<string, unknown> = {}, owner = true) => codexInteraction({
     id: 1, method: 'item/commandExecution/requestApproval', params: { ...params, ...overrides },
   }, undefined, owner)!;
@@ -180,6 +181,7 @@ test('remembering a command requires the owner, a valid proposal and an availabl
     assert.match(request.text, /not restricted to this working directory/);
     assert.match(request.text, /other sessions and bots/);
     assert.ok(request.text.includes(JSON.stringify(prefix, null, 2)));
+    assert.doesNotMatch(request.text, /Riftjack-Persist/);
     assert.throws(() => request.answer!('remember npm'), /exactly the displayed prefix/);
     assert.throws(() => request.answer!('yes'), /listed answer/);
   }
@@ -194,12 +196,36 @@ test('remembering a command requires the owner, a valid proposal and an availabl
   ]) assert.equal(interaction(overrides).answer, undefined);
 });
 
+test('automatic server proposals cannot replace explicit matching agent intent', () => {
+  const prefix = ['npm', 'run', 'test:http'];
+  const marker = 'Riftjack-Persist: ' + JSON.stringify(prefix);
+  for (const reason of [undefined, 'One-time only: editable project tests.', marker,
+    'Explanation\n' + marker + '\nMore text', 'Explanation\n' + marker + '\n' + marker,
+    'Explanation\nRiftjack-Persist: not-json', 'Explanation\nRiftjack-Persist: []',
+    'Explanation\nRiftjack-Persist: ["npm"]', 'Explanation\nRiftjack-Persist: [1]',
+    'Explanation\nRiftjack-Persist: [""]', 'Explanation\nRiftjack-Persist: ["npm\\u0000"]']) {
+    const request = codexInteraction({ id: 1, method: 'item/commandExecution/requestApproval', params: {
+      command: 'npm run test:http', reason, proposedExecpolicyAmendment: prefix,
+      availableDecisions: ['accept', { acceptWithExecpolicyAmendment: { execpolicy_amendment: prefix } }],
+    } }, undefined, true)!;
+    for (const field of ['answer', 'answerLabel', 'answerHint', 'answerReaction'] as const) assert.equal(request[field], undefined);
+    assert.match(request.text, /This request only/);
+    assert.deepEqual(request.approve, { decision: 'accept' });
+    assert.deepEqual(request.deny, { decision: 'decline' });
+  }
+  const request = codexInteraction({ id: 1, method: 'item/commandExecution/requestApproval', params: {
+    command: 'echo "' + marker + '"', reason: 'One-time only', proposedExecpolicyAmendment: prefix,
+  } }, undefined, true)!;
+  assert.equal(request.answer, undefined);
+});
+
 test('remember is explicit, bound to a fully delivered confirmation, and never selected by approval reactions', async () => {
   const prefix = ['npm', 'run', 'test:http'];
   for (const choice of ['remember', 'bookmark', 'bookmark-variation', 'approve', 'reaction', 'deny']) {
     const pending = new Interactions();
     const request = codexInteraction({ id: 1, method: 'item/commandExecution/requestApproval',
-      params: { command: 'npm run test:http', proposedExecpolicyAmendment: prefix } }, undefined, true)!;
+      params: { command: 'npm run test:http', proposedExecpolicyAmendment: prefix,
+        reason: `Assessed scope.\nRiftjack-Persist: ${JSON.stringify(prefix)}` } }, undefined, true)!;
     const result = pending.ask(request, signal(), async (text, controls, markdown) => {
       assert.match(pending.answer('!answer remember'), /still being delivered/);
       assert.match(text, /Approve and remember: !answer [a-f0-9]{12} remember/);
@@ -232,7 +258,8 @@ test('bookmark reactions select their own prefix among parallel confirmations an
   const pending = new Interactions();
   const start = (prefix: string[], event: string, taskSignal = signal()) => pending.ask(codexInteraction({
     id: event, method: 'item/commandExecution/requestApproval',
-    params: { command: prefix.join(' '), proposedExecpolicyAmendment: prefix },
+    params: { command: prefix.join(' '), proposedExecpolicyAmendment: prefix,
+      reason: `Assessed scope.\nRiftjack-Persist: ${JSON.stringify(prefix)}` },
   }, undefined, true)!, taskSignal, async (_text, controls) => controls.bind(event));
   const first = start(['npm', 'run', 'test:http'], '$first');
   const controller = new AbortController();

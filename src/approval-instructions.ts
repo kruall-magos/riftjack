@@ -1,3 +1,5 @@
+import { SAVE_INTENT } from './approval-intent.js';
+
 // Guidance for the agent's decision before it asks for approval. This is not
 // a command classifier or an enforcement boundary; the user still approves.
 export function approvalInstructions(engine: 'codex' | 'claude'): string {
@@ -11,7 +13,12 @@ export function approvalInstructions(engine: 'codex' | 'claude'): string {
     + 'the connector does not classify command safety for you. Never edit permission rules yourself to avoid confirmation. ';
   return common + (engine === 'codex'
     ? 'When requesting escalation, omit prefix_rule for one-time-only approval. Supply a narrow prefix_rule only after this assessment '
-      + 'supports future matching invocations. A proposed rule is not consent: the human must explicitly choose to save it.\n'
+      + 'supports future matching invocations. Codex may automatically propose a prefix even if you omit prefix_rule; that alone must not offer saving. '
+      + 'To explicitly offer saving, also append a final standalone line to the justification in this format:\n' + SAVE_INTENT + '["exact", "prefix", "arguments"]\n'
+      + 'Replace the JSON array with exactly the prefix_rule you assessed; put your explanation before that line. '
+      + 'For one-time approval or uncertainty, omit this line as well as prefix_rule. The connector offers saving only when this explicit choice '
+      + 'matches the server-proposed prefix exactly. Do not add the line merely because a prefix was suggested automatically. '
+      + 'A proposed rule is not consent: the human must explicitly choose to save it.\n'
     : 'Riftjack currently supports only one-time Claude tool approvals; it does not save Claude permission rules. '
       + 'Do not promise a persistent grant or change settings to simulate one.\n');
 }

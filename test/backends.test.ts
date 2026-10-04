@@ -76,9 +76,10 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
       if (prompt.includes('[approval]')) return send({ id: 999, method: 'item/commandExecution/requestApproval', params: {} });
       if (prompt.includes('[confirm]')) {
         const params = { threadId: prompt.includes('[wrong-thread]') ? 'other' : threadId, turnId, itemId: 'command', command: 'echo approved', cwd: __dirname, availableDecisions: ['accept', 'decline'], reason: 'Test approval' };
-        if (prompt.includes('[remember]')) {
+        if (prompt.includes('[remember]') || prompt.includes('[auto-prefix]')) {
           params.proposedExecpolicyAmendment = ['echo', 'approved'];
           params.availableDecisions.push({ acceptWithExecpolicyAmendment: { execpolicy_amendment: params.proposedExecpolicyAmendment } });
+          if (prompt.includes('[remember]')) params.reason += '\\nRiftjack-Persist: ' + JSON.stringify(params.proposedExecpolicyAmendment);
         }
         send({ id: 'approval-A', method: 'item/commandExecution/requestApproval', params });
         if (prompt.includes('[parallel]')) send({ id: 1001, method: 'item/commandExecution/requestApproval', params: { ...params, command: 'echo second' } });
@@ -569,6 +570,22 @@ for (const bookmark of [false, true]) test(`Matrix remember ${bookmark ? 'reacti
     { decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: ['echo', 'approved'] } } },
   ]);
   assert.equal(f.calls().filter(c => c.method === 'turn/steer').length, 0);
+  assert.deepEqual(f.errors, []);
+});
+
+test('a server-generated prefix without agent intent cannot be saved by text or reaction', async t => {
+  const f = confirming(t);
+  const task = f.bridge.handle('!dm:test', f.event('[confirm] [auto-prefix]'));
+  await until(() => f.confirmations().length === 1);
+  assert.doesNotMatch(f.confirmations()[0], /🔖|Approve and remember/);
+  await f.bridge.handle('!dm:test', f.event(`!answer ${f.id()} remember`));
+  await f.bridge.handle('!dm:test', { ...f.event(''), type: 'm.reaction', content: {
+    'm.relates_to': { rel_type: 'm.annotation', event_id: f.reactionTarget(), key: '🔖' },
+  } });
+  assert.equal(f.calls().some(c => c.id === 'approval-A'), false);
+  await f.bridge.handle('!dm:test', f.event(`!approve ${f.id()}`));
+  await task;
+  assert.deepEqual(f.calls().filter(c => c.id === 'approval-A').map(c => c.result), [{ decision: 'accept' }]);
   assert.deepEqual(f.errors, []);
 });
 

@@ -2,6 +2,7 @@ import { PublicError } from './accounts.js';
 import type { Interaction } from './interactions.js';
 import type { ServerRequest } from './app-server.js';
 import { confirmationDetails } from './confirmation-format.js';
+import { approvalIntent } from './approval-intent.js';
 
 const json = (value: unknown) => JSON.stringify(value, null, 2);
 const record = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
@@ -27,6 +28,7 @@ export function codexInteraction(request: ServerRequest, item?: Record<string, a
   const reason = typeof p.reason === 'string' ? [{ label: 'Reason', value: p.reason, spaced: true }] : [];
   switch (request.method) {
     case 'item/commandExecution/requestApproval': {
+      const intent = approvalIntent(p.reason);
       const command = p.command || item?.command;
       const canApprove = typeof command === 'string' && command.trim().length > 0 &&
         (p.availableDecisions == null || (Array.isArray(p.availableDecisions) && p.availableDecisions.includes('accept')));
@@ -37,12 +39,13 @@ export function codexInteraction(request: ServerRequest, item?: Record<string, a
         (!p.kind || p.kind === 'command') && !p.networkApprovalContext &&
         Array.isArray(proposed) && proposed.length && proposed.every(arg => typeof arg === 'string' && arg.length && !arg.includes('\0'))
         ? [...proposed] : undefined;
-      const canRemember = amendment && (p.availableDecisions == null || (Array.isArray(p.availableDecisions) &&
+      const canRemember = amendment && intent.prefix && JSON.stringify(intent.prefix) === JSON.stringify(amendment) &&
+        (p.availableDecisions == null || (Array.isArray(p.availableDecisions) &&
         p.availableDecisions.some(decision => record(decision) &&
           JSON.stringify(decision.acceptWithExecpolicyAmendment?.execpolicy_amendment) === JSON.stringify(amendment))));
       return { ...confirmationDetails([
         { value: `Codex requests permission for a command${p.kind && p.kind !== 'command' ? ` (${p.kind})` : ''}.` },
-        ...reason,
+        ...(intent.reason ? [{ label: 'Reason', value: intent.reason, spaced: true }] : []),
         { label: 'Command', value: String(command || '[not provided]'), code: true },
         { label: 'Working directory', value: String(p.cwd || item?.cwd || '[not provided]'), code: true },
         ...(p.networkApprovalContext ? [{ label: 'Network', value: json(p.networkApprovalContext), code: true }] : []),
