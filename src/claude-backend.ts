@@ -232,6 +232,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
     };
     live.set(key, steerHere);
     let assistantText = '';
+    let lastAssistantWasSynthetic = false;
     let pendingProgress = '';
     let progress = Promise.resolve();
     const flushProgress = () => {
@@ -324,13 +325,27 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
         });
         return;
       }
+      // CLI-generated messages describe its own state; they are not model output.
+      // Do not infer this from text: the model may legitimately quote that text.
+      if (message.type === 'assistant' && message.error === 'authentication_failed') {
+        throw new PublicError('Claude Code could not authenticate this task. Check claude auth status on the host and sign in again if needed. The task was not retried automatically.');
+      }
+      if (message.type === 'assistant' && message.message?.model === '<synthetic>') {
+        lastAssistantWasSynthetic = true;
+        if (message.error || message.isApiErrorMessage) {
+          throw new PublicError('Claude Code reported a service error. Check its account status and login on the host.');
+        }
+        return;
+      }
       if (message.type === 'assistant' && Array.isArray(message.message?.content)) {
+        lastAssistantWasSynthetic = false;
         flushProgress();
         assistantText = message.message.content.filter((block: any) => block.type === 'text' && typeof block.text === 'string').map((block: any) => block.text).join('\n');
         pendingProgress = assistantText;
         if (message.message.content.some((block: any) => block.type === 'tool_use')) flushProgress();
       }
       if (message.type === 'result') {
+        if (lastAssistantWasSynthetic) throw new PublicError('Claude Code ended with a service message instead of a model response. Check its login on the host before retrying.');
         if (message.is_error || message.subtype !== 'success') throw new PublicError('Claude could not complete the task. Check your Claude account limits, permissions and login on the host.');
         results.push(typeof message.result === 'string' ? message.result : assistantText);
         accepting = false;

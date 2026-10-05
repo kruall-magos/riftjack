@@ -100,6 +100,34 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
   if (prompt.includes('[bad-json]')) { console.log('invalid JSON'); return; }
   if (prompt.includes('[wait]')) { record({ waiting: true }); setInterval(() => {}, 1000); return; }
   if (prompt.includes('[approval]')) { output({ type: 'control_request', request: { subtype: 'can_use_tool' } }); setInterval(() => {}, 1000); return; }
+  const synthetic = (text, extra = {}) => output({ type: 'assistant', message: { model: '<synthetic>', content: [{ type: 'text', text }] }, session_id: 'claude-session-1', ...extra });
+  if (prompt.includes('[steering-auth-error]')) {
+    record({ waitingUpdate: true });
+    onUpdate = update => {
+      if (prompt.includes('[confirmed]')) echo(update);
+      synthetic('Not logged in · Please run /login', { error: 'authentication_failed', isApiErrorMessage: true });
+      finish('Not logged in · Please run /login');
+    };
+    return;
+  }
+  if (prompt.includes('[auth-error]')) {
+    synthetic('Not logged in · Please run /login', { error: 'authentication_failed', isApiErrorMessage: true });
+    finish('Not logged in · Please run /login'); return;
+  }
+  if (prompt.includes('[synthetic-error]')) {
+    synthetic('private diagnostic must not be forwarded', { error: 'unknown', isApiErrorMessage: true });
+    finish('private diagnostic must not be forwarded'); return;
+  }
+  if (prompt.includes('[resume-placeholder]') || prompt.includes('[synthetic-only]') || prompt.includes('[synthetic-fallback]')) {
+    synthetic('No response requested.', { isApiErrorMessage: false });
+    if (prompt.includes('[synthetic-only]')) { finish('No response requested.'); return; }
+    if (prompt.includes('[synthetic-fallback]')) { finish(); return; }
+  }
+  if (prompt.includes('[quote-placeholder]')) {
+    const text = 'No response requested.';
+    output({ type: 'assistant', message: { model: 'real-model', content: [{ type: 'text', text }] } });
+    finish(text); return;
+  }
   if (prompt.includes('[fail]')) { output({ type: 'result', subtype: 'error_during_execution', is_error: true, session_id: 'claude-session-1' }); return; }
   if (prompt.includes('[no-result]')) return;
   if (prompt.includes('[progress]')) {
@@ -569,3 +597,48 @@ test('Claude snapshots dynamic model settings and refreshes them on resume', asy
   assert.equal(args[args.indexOf('--model') + 1], 'second-model');
   assert.equal(args[args.indexOf('--resume') + 1], 'claude-session-1');
 });
+
+for (const prompt of ['[auth-error]', '[synthetic-error]', '[synthetic-only]', '[synthetic-fallback]']) {
+  test('Claude suppresses synthetic output and reports ' + prompt, async t => {
+    const f = setup(t), updates: string[] = [];
+    await assert.rejects(f.backend('claude', prompt, 'service', signal(), '@owner:test', [], undefined, undefined,
+      { progress: async text => { updates.push(text); } }), prompt === '[auth-error]' ? /could not authenticate/ : /service/);
+    assert.deepEqual(updates, []);
+    // No implicit retry or extra model invocation; resume remains possible.
+    assert.equal(f.calls().filter(call => call.input).length, 1);
+    assert.equal(f.state.session('service').claude, 'claude-session-1');
+    assert.equal(await f.backend('claude', 'retry', 'service', signal(), '@owner:test'), 'Claude answer');
+  });
+}
+
+test('Claude discards a resume placeholder before real progress and the final reply', async t => {
+  const f = setup(t), updates: string[] = [];
+  await f.backend('claude', 'first', 'service', signal(), '@owner:test');
+  const result = await f.backend('claude', '[resume-placeholder] [progress]', 'service', signal(), '@owner:test', [], undefined, undefined,
+    { progress: async text => { updates.push(text); } });
+  assert.equal(result, 'Claude answer');
+  assert.deepEqual(updates, ['Checking the files.', 'Running the checks.']);
+});
+
+test('Claude preserves real model text that quotes a service placeholder', async t => {
+  const f = setup(t);
+  assert.equal(await f.backend('claude', '[quote-placeholder]', 'service', signal(), '@owner:test'), 'No response requested.');
+});
+
+for (const confirmed of [false, true]) {
+  test('Claude authentication failure settles steering without retry, confirmed=' + confirmed, async t => {
+    const f = setup(t, { replay: true }), updates: string[] = [];
+    const task = f.backend('claude', '[steering-auth-error]' + (confirmed ? ' [confirmed]' : ''), 'service', signal(), '@owner:test', [], undefined, undefined,
+      { progress: async text => { updates.push(text); } });
+    const failed = assert.rejects(task, /could not authenticate/);
+    await until(() => f.calls().some(call => call.waitingUpdate));
+    const steering = f.backend.steer('continue', 'service', signal(), '@owner:test');
+    if (confirmed) assert.equal(await steering, true);
+    else await assert.rejects(steering, /before confirming/);
+    await failed;
+    assert.deepEqual(updates, []);
+    assert.equal(f.calls().filter(call => call.input).length, 1);
+    assert.equal(f.calls().filter(call => call.update).length, 1);
+    assert.equal(await f.backend.steer('later', 'service', signal(), '@owner:test'), false);
+  });
+}
