@@ -61,6 +61,63 @@ test('new branch report covers the complete tree and history', async t => {
   await pushReviewed(r, signal()); assert.equal(f.remoteHead(), f.head);
 });
 
+test('new branch excludes a long published history and ignores local tracking refs', async t => {
+  const f = setup(t);
+  const tree = f.git('rev-parse', 'HEAD^{tree}');
+  let parent = f.head;
+  for (let i = 0; i < 101; i++) parent = f.git('commit-tree', tree, '-p', parent, '-m', 'Published ' + i);
+  f.git('update-ref', 'refs/heads/main', parent);
+  f.git('push', 'origin', 'main');
+  f.git('--git-dir=' + f.remote, 'symbolic-ref', 'HEAD', 'refs/heads/main');
+  f.git('commit', '--allow-empty', '-m', 'Only new change');
+  const head = f.git('rev-parse', 'HEAD');
+  f.git('update-ref', 'refs/remotes/origin/main', head);
+  const r = await preparePublish({ ...f.input, branch: 'feature' }, f.root, signal());
+  assert.equal(r.base, null); assert.equal(r.reviewBase, parent);
+  assert.deepEqual(r.baseReference, { ref: 'refs/heads/main', head: parent });
+  assert.deepEqual(r.commits, [head]); assert.equal(r.patch, '');
+  assert.match(r.html, new RegExp(parent));
+  await pushReviewed(r, signal());
+  assert.equal(f.git('ls-remote', 'origin', 'refs/heads/feature').split('\t')[0], head);
+});
+
+test('new branch uses the common ancestor when the published default branch diverged', async t => {
+  const f = setup(t);
+  f.git('--git-dir=' + f.remote, 'symbolic-ref', 'HEAD', 'refs/heads/main');
+  f.git('checkout', '-b', 'other', f.base);
+  writeFileSync(join(f.repo, 'remote-only.txt'), 'Only remote');
+  f.git('add', '.'); f.git('commit', '-m', 'Remote diverges');
+  const remoteTip = f.git('rev-parse', 'HEAD');
+  f.git('push', 'origin', 'HEAD:main'); f.git('checkout', 'main');
+  const r = await preparePublish({ ...f.input, branch: 'feature' }, f.root, signal());
+  assert.equal(r.reviewBase, f.base); assert.equal(r.baseReference?.head, remoteTip);
+  assert.deepEqual(r.commits, [f.head]); assert.doesNotMatch(r.patch, /remote-only/);
+  await pushReviewed(r, signal());
+  assert.equal(f.remoteHead(), remoteTip);
+});
+
+for (const change of ['published-base', 'new-destination'] as const) test(`new-branch review rejects changed ${change}`, async t => {
+  const f = setup(t);
+  f.git('--git-dir=' + f.remote, 'symbolic-ref', 'HEAD', 'refs/heads/main');
+  const r = await preparePublish({ ...f.input, branch: 'feature' }, f.root, signal());
+  f.git('push', 'origin', change === 'published-base' ? 'HEAD:main' : 'HEAD:feature');
+  await assert.rejects(pushReviewed(r, signal()), /changed after review/);
+});
+
+test('creating a branch at an already published tip still requires approval', async t => {
+  const f = setup(t);
+  f.git('push', 'origin', 'HEAD:main');
+  f.git('--git-dir=' + f.remote, 'symbolic-ref', 'HEAD', 'refs/heads/main');
+  let requested = false;
+  const result = await requestPublish({ ...f.input, branch: 'feature' }, f.root, f.root, 1024 ** 2, signal(), async request => {
+    requested = true;
+    assert.match(request.text, /Published base reference/);
+    return request.deny;
+  }, async () => {});
+  assert.ok(requested); assert.match(result, /declined/);
+  assert.equal(f.git('ls-remote', 'origin', 'refs/heads/feature'), '');
+});
+
 test('reviewed push sends only the approved commit and no unrelated tags', async t => {
   const f = setup(t), r = await f.prepare();
   f.git('tag', '-a', 'unrelated', '-m', 'Tag'); f.git('config', 'push.followTags', 'true');

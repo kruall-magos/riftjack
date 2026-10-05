@@ -14,7 +14,7 @@ try {
   const review = await preparePublish(publishInput(input), values.workspace, AbortSignal.timeout(10 * 60_000));
   const output = resolve(values.output);
   await writeFile(output, review.html, { flag: 'wx', mode: 0o600 });
-  console.log(JSON.stringify({ output, head: review.head, base: review.base, remote: review.remote, branch: review.branch,
+  console.log(JSON.stringify({ output, head: review.head, base: review.base, reviewBase: review.reviewBase, baseReference: review.baseReference, remote: review.remote, branch: review.branch,
     commits: review.commits.length, sha256: review.sha256, published: false }));
 } catch (error) {
   console.error(error instanceof PublicError ? error.message : 'Could not create the review. Check paths, output-file availability and Git authentication.');

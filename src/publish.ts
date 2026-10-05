@@ -12,7 +12,8 @@ const exec = promisify(execFile);
 const LIMIT = 8 * 1024 * 1024;
 export type PublishInput = { repository: string; remote: string; branch: string };
 export type PublishReview = Readonly<PublishInput & {
-  url: string; base: string | null; head: string; createdAt: string;
+  url: string; base: string | null; reviewBase: string | null;
+  baseReference: Readonly<{ ref: string; head: string }> | null; head: string; createdAt: string;
   commits: readonly string[]; patch: string; history: readonly { oid: string; patch: string }[];
   workingTreeDirty: boolean; html: string; sha256: string;
 }>;
@@ -73,6 +74,21 @@ async function remoteHead(repo: string, url: string, ref: string, signal: AbortS
   return oid;
 }
 
+// Only trust an advertised branch on the publication destination, never a local
+// tracking ref or a different remote that might contain unpublished history.
+async function defaultBranch(repo: string, url: string, signal: AbortSignal) {
+  const output = (await git(repo, ['ls-remote', '--symref', '--', url, 'HEAD'], signal)).trim();
+  if (!output) return null;
+  const lines = output.split('\n');
+  const symbolic = lines.find(line => line.startsWith('ref: '));
+  const tip = lines.find(line => /^[a-f0-9]{40,64}\tHEAD$/.test(line));
+  if (!symbolic || !tip || lines.length !== 2) throw new PublicError('The remote HEAD must name a branch before preparing a new-branch review.');
+  const match = /^ref: (refs\/heads\/[^\s]+)\tHEAD$/.exec(symbolic);
+  if (!match) throw new PublicError('Unexpected remote default branch response.');
+  await git(repo, ['check-ref-format', match[1]], signal);
+  return Object.freeze({ ref: match[1], head: tip.split('\t')[0] });
+}
+
 export async function preparePublish(input: PublishInput, workspace: string, signal: AbortSignal): Promise<PublishReview> {
   input = publishInput(input);
   const root = await realpath(workspace), repository = await realpath(resolve(root, input.repository));
@@ -90,11 +106,23 @@ export async function preparePublish(input: PublishInput, workspace: string, sig
     try { await git(repository, ['merge-base', '--is-ancestor', base, head], signal); }
     catch { throw new PublicError('The destination is not an ancestor of HEAD. Reconcile the branches before requesting publication; history replacement is not supported.'); }
   }
-  const commits = (await git(repository, ['rev-list', '--reverse', base ? base + '..' + head : head], signal)).trim().split('\n');
+  let reviewBase = base;
+  const baseReference = base ? null : await defaultBranch(repository, url, signal);
+  if (baseReference) {
+    await git(repository, ['fetch', '--no-tags', '--no-write-fetch-head', '--', url, baseReference.head], signal);
+    const ancestors = (await git(repository, ['merge-base', '--all', head, baseReference.head], signal)).trim().split('\n');
+    if (ancestors.length !== 1 || !/^[a-f0-9]{40,64}$/.test(ancestors[0])) {
+      throw new PublicError('A new branch requires a unique common ancestor with the remote default branch.');
+    }
+    reviewBase = ancestors[0];
+  }
+  const historyRange = reviewBase ? reviewBase + '..' + head : head;
+  const commitList = (await git(repository, ['rev-list', '--max-count=101', '--reverse', historyRange], signal)).trim();
+  const commits = commitList ? commitList.split('\n') : [];
   if (commits.length > 100) throw new PublicError('Review exceeds 100 outgoing commits. Prepare a smaller publication.');
   const diffOptions = ['--no-ext-diff', '--no-textconv', '--no-color', '--find-renames', '--ignore-submodules=none'];
-  const emptyTree = base ? undefined : (await git(repository, ['hash-object', '-w', '-t', 'tree', '--stdin'], signal, '')).trim();
-  const patch = base ? await git(repository, ['diff', ...diffOptions, base, head, '--'], signal)
+  const emptyTree = reviewBase ? undefined : (await git(repository, ['hash-object', '-w', '-t', 'tree', '--stdin'], signal, '')).trim();
+  const patch = reviewBase ? await git(repository, ['diff', ...diffOptions, reviewBase, head, '--'], signal)
     : await git(repository, ['diff', ...diffOptions, emptyTree!, head, '--'], signal);
   const history: { oid: string; patch: string }[] = [];
   let size = Buffer.byteLength(patch);
@@ -105,7 +133,7 @@ export async function preparePublish(input: PublishInput, workspace: string, sig
     history.push(Object.freeze({ oid, patch: content }));
   }
   const workingTreeDirty = !!(await git(repository, ['status', '--porcelain', '--untracked-files=normal'], signal)).trim();
-  const data = { ...input, repository, url, base, head, createdAt: new Date().toISOString(), commits: Object.freeze(commits), patch,
+  const data = { ...input, repository, url, base, reviewBase, baseReference, head, createdAt: new Date().toISOString(), commits: Object.freeze(commits), patch,
     history: Object.freeze(history), workingTreeDirty };
   const html = renderPublishReview(data);
   return Object.freeze({ ...data, html, sha256: createHash('sha256').update(html).digest('hex') });
@@ -114,7 +142,8 @@ export async function preparePublish(input: PublishInput, workspace: string, sig
 export async function pushReviewed(review: PublishReview, signal: AbortSignal, authorize: () => Promise<void> = async () => {}): Promise<void> {
   if ((await git(review.repository, ['rev-parse', '--verify', 'HEAD^{commit}'], signal)).trim() !== review.head ||
       await destination(review.repository, review.remote, signal) !== review.url ||
-      await remoteHead(review.repository, review.url, 'refs/heads/' + review.branch, signal) !== review.base) {
+      await remoteHead(review.repository, review.url, 'refs/heads/' + review.branch, signal) !== review.base ||
+      (review.baseReference && await remoteHead(review.repository, review.url, review.baseReference.ref, signal) !== review.baseReference.head)) {
     throw new PublicError('HEAD or the destination changed after review. Prepare a new report and request confirmation again.');
   }
   await authorize();
@@ -137,7 +166,10 @@ export async function requestPublish(input: unknown, workspace: string, reportRo
     const decision = await interact({ ...confirmationDetails([
       { value: 'Publish the commits in the attached HTML review?' },
       { label: 'Repository', value: review.repository, code: true }, { label: 'Destination', value: review.url + ' → ' + review.branch, code: true },
-      { label: 'Remote base', value: review.base ?? '[new branch]', code: true }, { label: 'Publish HEAD', value: review.head, code: true },
+      { label: 'Remote destination tip', value: review.base ?? '[new branch]', code: true },
+      { label: 'Review base', value: review.reviewBase ?? '[empty tree]', code: true },
+      ...(review.baseReference ? [{ label: 'Published base reference', value: review.baseReference.ref + ' @ ' + review.baseReference.head, code: true as const }] : []),
+      { label: 'Publish HEAD', value: review.head, code: true },
       { label: 'Outgoing commits', value: String(review.commits.length) }, { label: 'Report SHA-256', value: review.sha256, code: true },
       { value: 'Only this commit and its history are published. Local uncommitted files and unrelated tags are excluded. Changed HEAD or destination requires a new review.' },
     ]), attachments: [{ path, root: directory, name }], approve: { publish: true }, deny: { publish: false } }, signal);
