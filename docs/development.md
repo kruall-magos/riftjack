@@ -70,3 +70,18 @@ and connector notes are included when applicable; empty observation fields are o
 Backend tests verify instruction delivery on start and resume, not the model's
 compaction implementation. A live compaction check must use a disposable session,
 never an active user's conversation.
+## Context compaction notices
+
+Codex `contextCompaction` item lifecycle events and Claude `compacting` status /
+`compact_boundary` stream events produce service notices in the human's encrypted
+DM with that bot. Linked shared conversations use the linked home DM. The
+destination must still have exactly the bot and the human; there is no fallback
+to the shared room. Notices contain no conversation content and do not trigger
+agent turns or mentions.
+
+Repeated starts/completions are suppressed within a backend call. Only an
+observed completion is reported as successful; a run ending while compaction is
+pending reports that completion was not confirmed. A hard connector crash cannot
+send that final notice. Delivery failures are reported without interrupting the
+agent, and uncertain sends are not retried. These notifications do not yet ask
+the agent to save or reload memory.

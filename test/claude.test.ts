@@ -50,6 +50,20 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
   const prompt = message.message.content[0].text;
   output({ type: 'system', subtype: 'init', session_id: 'claude-session-1', ...(prompt.includes('[missing-status]') ? {} : { model: 'resolved-claude', cwd: process.cwd(), permissionMode: 'acceptEdits', fast_mode_state: 'off' }) });
   const finish = result => output({ type: 'result', subtype: 'success', is_error: false, result, session_id: 'claude-session-1' });
+  if (prompt.includes('[compact]')) {
+    output({ type: 'system', subtype: 'compact_boundary', uuid: 'old' });
+    output({ type: 'system', subtype: 'status', status: 'compacting', parent_tool_use_id: 'child' });
+    output({ type: 'system', subtype: 'status', status: 'compacting' });
+    output({ type: 'system', subtype: 'status', status: 'compacting' });
+    output({ type: 'system', subtype: 'status', status: null });
+    if (!prompt.includes('[unfinished]')) {
+      output({ type: 'system', subtype: 'compact_boundary', uuid: 'new' });
+      output({ type: 'system', subtype: 'compact_boundary', uuid: 'new' });
+      output({ type: 'system', subtype: 'status', status: 'compacting' });
+      output({ type: 'system', subtype: 'compact_boundary', uuid: 'next' });
+    }
+    finish('done'); return;
+  }
   if (prompt.includes('[permission]')) {
     output({ type: 'control_request', request_id: 'perm-1', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: { command: 'touch x', description: 'Create x', timeout: 5, dangerouslyDisableSandbox: true }, decision_reason: 'Outside the sandbox' } });
     onResponse = response => finish('Permission ' + response.response.response.behavior);
@@ -678,3 +692,10 @@ for (const confirmed of [false, true]) {
     assert.equal(await f.backend.steer('later', 'service', signal(), '@owner:test'), false);
   });
 }
+
+for (const unfinished of [false, true]) test(`Claude compaction notifications, unfinished=${unfinished}`, async t => {
+  const f = setup(t), phases: string[] = [];
+  await f.backend('claude', '[compact]' + (unfinished ? '[unfinished]' : ''), 'key', signal(), '@owner:test', [], undefined, undefined,
+    { compaction: async phase => { phases.push(phase); } });
+  assert.deepEqual(phases, unfinished ? ['started', 'unconfirmed'] : ['started', 'completed', 'started', 'completed']);
+});

@@ -1,4 +1,5 @@
 import { routingInstructions } from './routing-instructions.js';
+import { compactionNotices } from './compaction-notices.js';
 import { startBackgroundMcp, BACKGROUND_SERVER, BACKGROUND_TOOL, backgroundInstructions } from './background-mcp.js';
 import { attachmentDelivery } from './attachment-delivery.js';
 import { startAttachmentMcp, ATTACHMENT_SERVER, ATTACHMENT_TOOL } from './attachment-mcp.js';
@@ -243,6 +244,8 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
     let lastAssistantWasSynthetic = false;
     let pendingProgress = '';
     let progress = Promise.resolve();
+    const compactions = compactionNotices(hooks?.compaction);
+    let compactId = 0, compacting = false;
     const flushProgress = () => {
       if (pendingProgress && hooks?.progress) {
         const text = pendingProgress;
@@ -308,6 +311,16 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
         state.update(key, { claudeReport: engineReport({ model: message.model, cwd: message.cwd,
           reasoningEffort: message.effort, fastMode: message.fast_mode_state, permissionMode: message.permissionMode }) });
       }
+      if (message.type === 'system' && !message.parent_tool_use_id) {
+        if (message.subtype === 'status' && message.status === 'compacting') {
+          if (!compacting) { compacting = true; compactions.start(String(++compactId)); }
+        }
+        if (message.subtype === 'compact_boundary' && compacting) {
+          compactions.complete(String(compactId)); compacting = false;
+        }
+        // A null status also occurs for permission-mode changes; it is not
+        // evidence that compaction succeeded. Only compact_boundary is.
+      }
       if (message.type === 'control_cancel_request') {
         pending.get(message.request_id)?.abort(); pending.delete(message.request_id);
         return;
@@ -365,6 +378,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
     }, input, interactive || replay, stdin => { stdinRef = stdin; });
       await progress;
     } finally {
+      await compactions.close();
       if (live.get(key) === steerHere) live.delete(key);
       accepting = false; clearTimeout(grace); unconfirmed();
       close(); mediaLifetime.abort(); await media?.close(); await rooms?.close(); await progress.catch(() => {}); await background?.close(); await publication?.close();
