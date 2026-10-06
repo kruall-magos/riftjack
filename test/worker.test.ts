@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WorkerQueue } from '../src/worker-queue.js';
@@ -18,6 +18,48 @@ function directory(t: { after(fn: () => void): void }) {
   t.after(() => rmSync(dir, { recursive: true, force: true })); return dir;
 }
 const idle = async (service: WorkerService) => { while (service.busy) await new Promise(resolve => setTimeout(resolve, 1)); };
+
+test('attachment downloads are shared, persisted across restart and guarded on every cached read', async t => {
+  const dir = realpathSync(directory(t)), db = join(dir, 'queue.sqlite'), path = join(dir, 'attachment.txt');
+  writeFileSync(path, 'hello');
+  let queue = new WorkerQueue(db), downloads = 0, allowed = true;
+  const transport = { allowed: async () => allowed, receive: async () => {
+    downloads++; await new Promise(resolve => setTimeout(resolve, 10));
+    return { path, name: 'attachment.txt', size: 5, mimetype: 'text/plain', image: false };
+  }, prepare: async () => [], send: async () => {}, report: () => {} };
+  let service = new WorkerService(queue, join(dir, 'files'), 100, transport);
+  const task = queue.claim(queue.enqueue('!dm:test', event(), 'c').id)!;
+  const replies = await Promise.all([service.attachment(task.id, task.lease!), service.attachment(task.id, task.lease!)]);
+  assert.equal(downloads, 1); assert.deepEqual(replies[0], replies[1]);
+  assert.equal(Buffer.from(replies[0].data, 'base64').toString(), 'hello');
+  service.stop(); queue.close(); queue = new WorkerQueue(db);
+  service = new WorkerService(queue, join(dir, 'files'), 100, transport);
+  t.after(() => { service.stop(); queue.close(); });
+  assert.deepEqual(await service.attachment(task.id, task.lease!), replies[0]);
+  assert.equal(downloads, 1);
+  queue.release(task.id, task.lease!);
+  const renewed = queue.claim(task.id)!;
+  await assert.rejects(service.attachment(task.id, task.lease!), /replaced/);
+  assert.deepEqual(await service.attachment(task.id, renewed.lease!), replies[0]);
+  allowed = false;
+  await assert.rejects(service.attachment(task.id, renewed.lease!), /privacy changed/);
+  assert.equal(downloads, 1);
+});
+
+test('failed attachment downloads can be retried without poisoning the cache', async t => {
+  const dir = realpathSync(directory(t)), queue = new WorkerQueue(join(dir, 'queue.sqlite'));
+  const path = join(dir, 'attachment.txt'); writeFileSync(path, 'hello');
+  let downloads = 0;
+  const service = new WorkerService(queue, join(dir, 'files'), 100, { allowed: async () => true,
+    receive: async () => { if (++downloads === 1) throw new Error('Download failed');
+      return { path, name: 'attachment.txt', size: 5, mimetype: 'text/plain', image: false }; },
+    prepare: async () => [], send: async () => {}, report: () => {} });
+  t.after(() => { service.stop(); queue.close(); });
+  const task = queue.claim(queue.enqueue('!dm:test', event(), 'c').id)!;
+  await assert.rejects(service.attachment(task.id, task.lease!), /Download failed/);
+  assert.equal((await service.attachment(task.id, task.lease!)).name, 'attachment.txt');
+  assert.equal(downloads, 2);
+});
 
 test('durable inbox deduplicates events, leases exclusively, and rejects stale results after restart', t => {
   const dir = directory(t), file = join(dir, 'queue.sqlite'); let now = 1000;
