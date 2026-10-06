@@ -259,6 +259,10 @@ async function main() {
       roomMessages: linkedAgent ? (request, context, signal) => linkedRoomMessages(links, account.userId, context, {
         allowed: privateRoom, stopping: () => stopping || restart.pending,
         send: (room, content) => client.sendMessage(room, content),
+        read: reactionTarget,
+        receive: (event, key, signal) => media.receive(event.content!, key, signal),
+        maxBytes: botConfig.maxMediaBytes,
+        sendFiles: (room, files, signal, authorize) => media.send(room, files, undefined, signal, authorize),
       })(request, signal) : undefined,
       mentions: linkedAgent ? (room, text) => links.mentions(account.userId, room, text) : undefined,
       shared: linkedAgent ? room => !!links.room(account.userId, room) : undefined,
