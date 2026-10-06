@@ -151,23 +151,32 @@ export const httpsTransport: Transport = (url, init) => new Promise((resolve, re
 });
 
 type Helper = ChildProcessByStdio<Writable, Readable, Readable>;
+const HELPER_EXIT_MS = 5_000;
 
-// Waits until the helper prints `line` or exits; returns its output so far.
-async function helperOutput(child: Helper, exited: Promise<number | null>, until?: string): Promise<string> {
-  let out = '';
-  const done = new Promise<void>(resolve => {
-    const onData = (data: Buffer) => { out += data; if (until && out.includes(until)) { child.stdout.off('data', onData); resolve(); } };
-    child.stdout.on('data', onData);
-    exited.then(() => resolve());
+// Every wait on the helper ends when the operation is cancelled or times out.
+function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
   });
-  await done;
-  return out;
 }
 
-async function frame(stdin: Writable, data: Uint8Array) {
+// Resolves when the helper prints `until` or exits; returns its output so far.
+function helperOutput(child: Helper, exited: Promise<number | null>, until?: string): Promise<string> {
+  let out = '';
+  return new Promise<string>(resolve => {
+    const onData = (data: Buffer) => { out += data; if (until && out.includes(until)) { child.stdout.off('data', onData); resolve(out); } };
+    child.stdout.on('data', onData);
+    exited.then(() => resolve(out));
+  });
+}
+
+async function frame(stdin: Writable, data: Uint8Array, signal: AbortSignal) {
   const header = Buffer.alloc(4);
   header.writeUInt32BE(data.length);
-  if (!stdin.write(Buffer.concat([header, data]))) await Promise.race([once(stdin, 'drain'), once(stdin, 'close')]);
+  if (!stdin.write(Buffer.concat([header, data]))) await abortable(Promise.race([once(stdin, 'drain'), once(stdin, 'close')]), signal);
   if (stdin.destroyed) throw new Error('The save helper stopped accepting data.');
 }
 
@@ -175,34 +184,39 @@ async function frame(stdin: Writable, data: Uint8Array) {
 // empty frame the helper removes the file, so any failure here leaves nothing behind.
 async function saveBody(config: FetchConfig, workspace: string, name: string, body: FetchResponse['body'], deadline: AbortSignal) {
   const child = spawn(config.python, [HELPER, workspace, name, String(config.maxBytes)], { stdio: ['pipe', 'pipe', 'pipe'] }) as Helper;
-  let stderr = '';
+  let stderr = '', exitCode: number | null | undefined;
   child.stderr.on('data', (data: Buffer) => { if (stderr.length < 1000) stderr += data; });
   child.stdin.on('error', () => {});
-  const exited = new Promise<number | null>(resolve => { child.once('close', code => resolve(code)); child.once('error', () => resolve(null)); });
+  const exited = new Promise<number | null>(resolve => {
+    child.once('close', code => resolve(exitCode = code));
+    child.once('error', () => resolve(exitCode = null));
+  });
   const failure = () => new Error(stderr.trim().split('\n').pop() || 'the save helper failed');
   let bytes = 0, truncated = false, committed = false;
   try {
-    if (!(await helperOutput(child, exited, 'ready\n')).includes('ready\n')) throw failure();
+    if (!(await abortable(helperOutput(child, exited, 'ready\n'), deadline)).includes('ready\n')) throw failure();
     for await (const chunk of body) {
       deadline.throwIfAborted();
       const take = Math.min(chunk.length, config.maxBytes - bytes);
-      if (take) await frame(child.stdin, chunk.subarray(0, take));
+      if (take) await frame(child.stdin, chunk.subarray(0, take), deadline);
       bytes += take;
       if (take < chunk.length) { truncated = true; break; }
     }
     deadline.throwIfAborted();
     const saved = helperOutput(child, exited);
-    await frame(child.stdin, new Uint8Array(0));
+    await frame(child.stdin, new Uint8Array(0), deadline);
     committed = true;
     child.stdin.end();
-    const [code, out] = await Promise.all([exited, saved]);
+    const [code, out] = await abortable(Promise.all([exited, saved]), deadline);
     if (code !== 0 || !out.includes(`saved ${bytes}\n`)) throw failure();
     return { bytes, truncated };
   } finally {
-    if (!committed) {
-      // Closing stdin before the commit makes the helper remove the file and exit.
+    if (exitCode === undefined) {
+      // Before the commit, end of input or SIGTERM makes the helper remove the file and
+      // exit; one that does not exit in time is killed, so cleanup is always bounded.
       child.stdin.end();
-      const timer = setTimeout(() => child.kill('SIGKILL'), 5_000);
+      child.kill('SIGTERM');
+      const timer = setTimeout(() => child.kill('SIGKILL'), HELPER_EXIT_MS);
       await exited;
       clearTimeout(timer);
     }
@@ -232,6 +246,8 @@ export function fetchAction(config: FetchConfig, workspace: string, transport: T
         if ((cause as { code?: string })?.code === 'ERR_RIFTJACK_NON_PUBLIC') throw new PublicError('Refused: the host resolves to a non-public address.');
         throw new PublicError(`Request failed: ${deadline.aborted ? 'timed out' : safeErrorSummary(cause)}.`);
       }
+      // A stream error before we start reading must reach the reader, not crash the process.
+      (response.body as Partial<Readable>).on?.('error', () => {});
       if (![301, 302, 303, 307, 308].includes(response.status)) break;
       response.body.destroy();
       if (!response.location || hop >= MAX_REDIRECTS) throw new PublicError(`Too many or invalid redirects (HTTP ${response.status}).`);

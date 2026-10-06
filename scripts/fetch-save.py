@@ -11,10 +11,11 @@ Usage: fetch-save.py WORKSPACE NAME MAX_BYTES
 WORKSPACE must be an absolute path without symlinks (the connector passes its
 realpath). After the file is created the helper prints "ready". stdin then carries
 frames: a 4-byte big-endian length and that many bytes; a zero length commits.
-If stdin ends before the commit, the file is removed. Prints "saved BYTES" on success.
+If stdin ends before the commit or SIGTERM arrives, the file is removed. Prints "saved BYTES" on success.
 """
 import os
 import re
+import signal
 import sys
 
 DIR = '.fetch'
@@ -83,6 +84,8 @@ def main():
 
 
 if __name__ == '__main__':
+    # SystemExit unwinds through main's finally, which removes an uncommitted file.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
     try:
         main()
     except Exception as error:

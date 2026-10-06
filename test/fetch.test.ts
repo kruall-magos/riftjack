@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { PassThrough } from 'node:stream';
 import { fetchAction, isPublicAddress, loadFetchConfig, parsePrefix, publicLookup, type FetchResponse, type Transport } from '../src/fetch.js';
 
 const signal = new AbortController().signal;
@@ -216,4 +217,26 @@ test('fetch truncates at the limit, removes partial files on failure or cancel, 
   const head = JSON.parse(await action({ url: `${API}big`, method: 'HEAD' }, signal));
   assert.equal(head.file, undefined);
   assert.equal(files(dir).length, before);
+});
+
+// A helper that is slow to start or never starts must not hang the tool or crash the connector.
+test('a stream error while the helper starts is reported, and cancel ends a hung helper quickly', async t => {
+  const { dir, config } = setup(t);
+  const wrapper = (name: string, body: string) => { const file = join(dir, name); writeFileSync(file, `#!/bin/sh\n${body}\n`); chmodSync(file, 0o700); return file; };
+  const slow = { ...config, python: wrapper('slow.sh', `sleep 0.5\nexec "${config.python}" "$@"`) };
+  const stream = new PassThrough();
+  const { transport } = fake({ [`${API}reset`]: () => {
+    setTimeout(() => stream.destroy(new Error('connection reset')), 50);
+    return { status: 200, contentType: 'text/plain', body: stream };
+  } });
+  await assert.rejects(fetchAction(slow, dir, transport)({ url: `${API}reset` }, signal), /Saving the response failed/);
+  assert.deepEqual(files(dir), []);
+
+  const hung = { ...config, python: wrapper('hung.sh', 'exec sleep 30') };
+  const controller = new AbortController();
+  const { transport: second } = fake({ [`${API}hang`]: () => ok('data') });
+  setTimeout(() => controller.abort(), 50);
+  const started = Date.now();
+  await assert.rejects(fetchAction(hung, dir, second)({ url: `${API}hang` }, controller.signal));
+  assert.ok(Date.now() - started < 2_000, `cancel took ${Date.now() - started} ms`);
 });
