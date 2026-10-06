@@ -2,7 +2,8 @@ import { linkedRoomMessages } from './room-messages.js';
 import { withEngineSettings } from './engine-settings.js';
 import { parseBotSettingsRequest, manageBotSettings } from './bot-settings.js';
 import { BackgroundTasks } from './background-tasks.js';
-import { mkdirSync, openSync, closeSync, readFileSync, unlinkSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { InstanceBusyError, lockInstance } from './instance-lock.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { botStatus } from './bot-status.js';
@@ -52,19 +53,6 @@ function diagnostics(error: unknown, bot?: string) {
   console.error(JSON.stringify({ time: new Date().toISOString(), event: 'connector-error', bot, message: errorMessage(error) }));
 }
 
-function lock(dir: string) {
-  const file = join(dir, 'connector.pid');
-  try {
-    const fd = openSync(file, 'wx', 0o600);
-    writeFileSync(fd, String(process.pid)); closeSync(fd);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    const pid = Number(readFileSync(file, 'utf8'));
-    throw new PublicError('Connector lock exists (PID ' + pid + '). Stop that process first. If it crashed, remove ' + file + ' and restart.');
-  }
-  process.once('exit', () => { try { unlinkSync(file); } catch {} });
-}
-
 async function main() {
   const args = process.argv.slice(2);
   if (args.length > 1 || args.some(arg => !['--check-config', '--check-claude', '--bootstrap-codex', '--bootstrap-claude', '--bootstrap-grok'].includes(arg))) {
@@ -78,7 +66,14 @@ async function main() {
   if (process.argv.includes('--check-config')) { console.log('Configuration is valid. No network requests were made.'); return; }
   if (process.argv.includes('--check-claude')) { await checkClaude(config); console.log('Claude Code supports the required CLI options and reports a Claude account login. No model request was made.'); return; }
   mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
-  lock(config.dataDir);
+  try { lockInstance(config.dataDir); }
+  catch (error) {
+    // Contention is not a crash: do not retry or roll back the running code.
+    if (!(error instanceof InstanceBusyError)) throw error;
+    console.error(error.message);
+    process.exitCode = CONFIG_EXIT_CODE;
+    return;
+  }
   if (config.sshTunnel) tunnel = new SshTunnel(config.sshTunnel, { report: message => console.log(message) });
   const accounts = new Accounts(join(config.dataDir, 'accounts.json'));
   const access = new Access(join(config.dataDir, 'allowed-users.json'), config.owner);

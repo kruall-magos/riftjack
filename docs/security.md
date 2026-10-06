@@ -12,7 +12,7 @@ Keep the instance directory outside the repository: real `.env` files, account t
 
 ## Credentials and backups
 
-`.env` and `data/` are gitignored. Bot credentials, session mappings, sync positions, and encryption keys live in `data/`, using private filesystem permissions. Preserve and back up that directory together. Never run two instances against the same data directory; a PID file prevents accidental overlap. If the process crashes, verify the old PID is no longer running before removing `data/connector.pid`.
+`.env` and `data/` are gitignored. Bot credentials, session mappings, sync positions, and encryption keys live in `data/`, using private filesystem permissions. Preserve and back up that directory together. Never run two instances against the same data directory. An exclusive SQLite transaction in `data/connector.lock.sqlite` holds an OS file lock for the connector lifetime. The OS releases it after a crash or reboot; stale `data/connector.pid` contents do not block startup. The PID file is diagnostic only. Keep the data directory on a local filesystem with working file locks, and never delete or replace the lock database while a connector may be running.
 
 The admin provisioning path creates a non-admin Synapse account and signs in with a generated password to obtain a device-bound token. It does not use the admin impersonation endpoint, which lacks a device. Shared-secret registration is also supported. These provisioning methods require Synapse's native authentication; Matrix Authentication Service requires a different adapter. Check that your homeserver supports native password login before provisioning accounts.
 

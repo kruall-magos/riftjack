@@ -56,15 +56,16 @@ if [ -n "$pids" ]; then
   echo "Stopping supervisor: $pids"
   for pid in $pids; do kill -TERM "$pid" 2>/dev/null || true; done
 fi
-# Wait for both the connector lock and every old supervisor/wrapper to disappear.
+# Wait for every old supervisor/wrapper to disappear.
 # A gap between connector children is not sufficient evidence that a supervisor stopped.
+# A stale PID file is diagnostic only; the new connector acquires the OS lock.
 i=0
 while :; do
   running=0
   for pid in $pids; do if kill -0 "$pid" 2>/dev/null; then running=1; fi; done
-  if [ "$running" -eq 0 ] && [ ! -e "$data_dir/connector.pid" ]; then break; fi
+  if [ "$running" -eq 0 ]; then break; fi
   if [ "$i" -ge 30 ]; then
-    echo "The old supervisor/connector has not stopped or its lock remains; not starting another instance." >&2
+    echo "The old supervisor has not stopped; not starting another instance." >&2
     exit 1
   fi
   sleep 1
