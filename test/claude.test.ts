@@ -1,3 +1,4 @@
+import { routingInstructions } from '../src/routing-instructions.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, realpathSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
@@ -14,7 +15,7 @@ import type { BackendReply } from '../src/media.js';
 import { configForWorkspace } from '../src/workspace.js';
 import { approvalInstructions } from '../src/approval-instructions.js';
 
-function setup(t: { after(fn: () => void): void }, options: { auth?: string; malformed?: boolean; legacy?: boolean; replay?: boolean } = {}) {
+function setup(t: { after(fn: () => void): void }, options: { auth?: string; malformed?: boolean; legacy?: boolean; replay?: boolean; snapshot?: boolean } = {}) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'matrix-claude-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const executable = join(dir, 'claude.cjs');
@@ -25,7 +26,7 @@ const args = process.argv.slice(2);
 const record = value => fs.appendFileSync(__filename + '.calls', JSON.stringify(value) + '\\n');
 record({ args, cwd: process.cwd(), user: process.env.USER, logname: process.env.LOGNAME, secrets: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'AWS_ACCESS_KEY_ID', 'SYNAPSE_ADMIN_TOKEN', 'MATRIX_OWNER_ID', 'ANTHROPIC_BASE_URL', 'CLAUDECODE'].filter(key => process.env[key]) });
 if (args.includes('--help')) {
-  console.log(${JSON.stringify(options.legacy ? '--help' : '--input-format --output-format --permission-mode --permission-prompt-tool --append-system-prompt --tools --settings --resume' + (options.replay ? ' --replay-user-messages' : ''))}); process.exit(0);
+  console.log(${JSON.stringify(options.legacy ? '--help' : '--input-format --output-format --permission-mode --permission-prompt-tool --append-system-prompt --tools --settings --resume' + (options.replay ? ' --replay-user-messages' : '') + (options.snapshot ? ' --system-prompt-snapshot' : ''))}); process.exit(0);
 }
 if (args[0] === 'auth') {
   console.log(${JSON.stringify(options.malformed ? 'not json' : JSON.stringify({ loggedIn: options.auth !== 'none', authMethod: options.auth || 'claude.ai', apiProvider: 'firstParty' }))}); process.exit(0);
@@ -192,6 +193,23 @@ test('Claude readiness checks options and login without a model request', async 
   assert.deepEqual(f.calls().map(call => call.args), [['--help'], ['auth', 'status', '--json']]);
 });
 
+for (const snapshot of [false, true]) test(`Claude refreshes system instructions on resume with snapshot support=${snapshot}`, async t => {
+  const f = setup(t, { snapshot });
+  await f.backend('claude', 'hello', 'key', signal(), '@owner:test');
+  const backend = createBackend({ ...f.config, maxMediaBytes: 123456 }, new State(join(f.dir, 'state.json')));
+  await backend('claude', 'continue', 'key', signal(), '@owner:test');
+  const runs = f.calls().filter(call => call.args?.includes('--print'));
+  assert.equal(runs.length, 2);
+  assert.ok(runs[1].args.includes('--resume'));
+  for (const { args } of runs) {
+    const at = args.indexOf('--system-prompt-snapshot');
+    assert.equal(at >= 0, snapshot);
+    if (snapshot) assert.equal(args[at + 1], 'off');
+    assert.ok(args[args.indexOf('--append-system-prompt') + 1].includes(routingInstructions));
+  }
+  assert.match(runs[1].args[runs[1].args.indexOf('--append-system-prompt') + 1], /123456 bytes each/);
+});
+
 test('new and resumed Claude sessions receive approval judgment in the system prompt', async t => {
   const f = setup(t);
   await f.backend('claude', 'hello', 'key', signal(), '@owner:test');
@@ -201,6 +219,7 @@ test('new and resumed Claude sessions receive approval judgment in the system pr
   for (const { args } of runs) {
     const instructions = args[args.indexOf('--append-system-prompt') + 1];
     assert.ok(instructions.includes(approvalInstructions('claude')));
+    assert.ok(instructions.includes(routingInstructions));
     assert.ok(!instructions.includes('omit prefix_rule'));
   }
   assert.ok(runs[1].args.includes('--resume'));
