@@ -274,7 +274,7 @@ test('existing Codex sessions receive approval judgment instructions once before
   await f.backend('codex', 'again', 'key', signal(), '@owner:test');
   assert.equal(f.calls().filter(c => c.method === 'thread/inject_items').length, 1);
   for (const call of f.calls().filter(c => c.method === 'thread/resume')) {
-    assert.ok(call.params.developerInstructions.includes(routingInstructions));
+    assert.equal(call.params.developerInstructions, undefined);
   }
 });
 
