@@ -19,6 +19,9 @@ export function claudeInteraction(request: Record<string, any>): Interaction | u
   if (request.subtype !== 'can_use_tool' || typeof request.tool_name !== 'string' || !record(request.input)) return;
   const { tool_name: tool, input } = request;
   const details: Parameters<typeof confirmationDetails>[0] = [{ value: `Claude Code requests permission to use ${tool}.` }];
+  if (tool === 'Bash' && input.dangerouslyDisableSandbox === true) {
+    details.push({ value: 'This command will run outside the Claude sandbox.', spaced: true });
+  }
   if (request.decision_reason != null) details.push({ label: 'Reason', value: text(request.decision_reason), spaced: true });
   if (typeof request.blocked_path === 'string') details.push({ label: 'Blocked path', value: request.blocked_path, code: true });
   const shown = new Set<string>();

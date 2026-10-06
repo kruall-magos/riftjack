@@ -153,7 +153,10 @@ export function claudeArguments(config: Config, session?: string, interactive = 
   const readOnly = config.sandbox === 'read-only';
   const tools = readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash';
   const settings = {
-    sandbox: { enabled: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false },
+    // Sandboxed Bash skips this blanket ask rule in auto-allow mode. Outside the
+    // sandbox it takes precedence over saved allow rules, including exclusions.
+    permissions: { ask: ['Bash'] },
+    sandbox: { enabled: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: interactive && claudeApprovals(config) },
   };
   const args = ['--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
     '--permission-mode', readOnly ? 'dontAsk' : 'acceptEdits', '--tools', tools,

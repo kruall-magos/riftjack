@@ -50,7 +50,7 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
   output({ type: 'system', subtype: 'init', session_id: 'claude-session-1', ...(prompt.includes('[missing-status]') ? {} : { model: 'resolved-claude', cwd: process.cwd(), permissionMode: 'acceptEdits', fast_mode_state: 'off' }) });
   const finish = result => output({ type: 'result', subtype: 'success', is_error: false, result, session_id: 'claude-session-1' });
   if (prompt.includes('[permission]')) {
-    output({ type: 'control_request', request_id: 'perm-1', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: { command: 'touch x', description: 'Create x', timeout: 5 }, decision_reason: 'Outside the sandbox' } });
+    output({ type: 'control_request', request_id: 'perm-1', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: { command: 'touch x', description: 'Create x', timeout: 5, dangerouslyDisableSandbox: true }, decision_reason: 'Outside the sandbox' } });
     onResponse = response => finish('Permission ' + response.response.response.behavior);
     return;
   }
@@ -338,6 +338,7 @@ for (const [name, decide, expected] of [
     let text = '';
     const interact: Interact = async question => { text = question.text; return decide(question); };
     assert.equal(await f.backend('claude', '[permission]', 'key', signal(), '@owner:test', [], interact), expected);
+    assert.match(text, /outside the Claude sandbox/);
     assert.match(text, /use Bash/); assert.match(text, /Reason: Outside the sandbox/);
     assert.match(text, /Command: touch x/); assert.match(text, /Description: Create x/); assert.match(text, /"timeout": 5/);
     const run = f.calls().find(call => call.args?.includes('--print'));
@@ -346,7 +347,7 @@ for (const [name, decide, expected] of [
     assert.equal(response.type, 'control_response');
     assert.equal(response.response.request_id, 'perm-1');
     assert.equal(response.response.response.behavior, expected === 'Permission allow' ? 'allow' : 'deny');
-    if (expected === 'Permission allow') assert.deepEqual(response.response.response.updatedInput, { command: 'touch x', description: 'Create x', timeout: 5 });
+    if (expected === 'Permission allow') assert.deepEqual(response.response.response.updatedInput, { command: 'touch x', description: 'Create x', timeout: 5, dangerouslyDisableSandbox: true });
   });
 }
 
@@ -397,6 +398,22 @@ test('Claude permission arguments enable its sandbox without bypass and limit re
   const readOnly = claudeArguments({ ...f.config, sandbox: 'read-only' });
   assert.equal(readOnly[readOnly.indexOf('--tools') + 1], 'Read,Glob,Grep');
   assert.equal(readOnly[readOnly.indexOf('--permission-mode') + 1], 'dontAsk');
+});
+
+test('unsandboxed retries require on-request policy and a confirmation channel', t => {
+  const f = setup(t);
+  for (const sandbox of ['workspace-write', 'read-only'] as const) {
+    for (const claudeApprovalPolicy of ['on-request', 'never'] as const) {
+      for (const interactive of [false, true]) {
+        const args = claudeArguments({ ...f.config, sandbox, claudeApprovalPolicy }, undefined, interactive);
+        const settings = JSON.parse(args[args.indexOf('--settings') + 1]);
+        assert.equal(settings.sandbox.allowUnsandboxedCommands,
+          sandbox === 'workspace-write' && claudeApprovalPolicy === 'on-request' && interactive);
+        assert.equal(settings.sandbox.autoAllowBashIfSandboxed, true);
+        assert.deepEqual(settings.permissions.ask, ['Bash']);
+      }
+    }
+  }
 });
 
 test('Claude receives native image content and file/audio paths and can return encrypted-delivery manifests', async t => {

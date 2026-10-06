@@ -20,5 +20,9 @@ export function approvalInstructions(engine: 'codex' | 'claude'): string {
       + 'matches the server-proposed prefix exactly. Do not add the line merely because a prefix was suggested automatically. '
       + 'A proposed rule is not consent: the human must explicitly choose to save it.\n'
     : 'Riftjack currently supports only one-time Claude tool approvals; it does not save Claude permission rules. '
-      + 'Do not promise a persistent grant or change settings to simulate one.\n');
+      + 'Do not promise a persistent grant or change settings to simulate one. '
+      + 'When unsandboxed retries are enabled and a required command fails because of the sandbox, '
+      + 'request a retry with dangerouslyDisableSandbox: true and explain the exact scope in the Bash description. '
+      + 'Riftjack sends that request to the human for one-time confirmation. '
+      + 'Before requesting a process signal, verify the current process identity and target only that process or its verified group.\n');
 }
