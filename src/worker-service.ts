@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { WorkerError, WorkerQueue, type WorkerTask, type WorkerFile } from './worker-queue.js';
@@ -53,7 +53,8 @@ export class WorkerService {
     return { released: true };
   }
   async attachment(id: string, lease: string) {
-    const task = this.queue.checkLease(id, lease); await this.allowed(task);
+    let task = this.queue.checkLease(id, lease); await this.allowed(task);
+    task = this.queue.checkLease(id, lease);
     let download = this.downloads.get(id);
     if (!task.attachment && !download) {
       download = (async () => {
@@ -70,6 +71,7 @@ export class WorkerService {
     const data = await readOutgoing({ path: file.path, root: dirname(file.path) }, this.maxBytes);
     // Cached reads still require a live lease and current room authorization.
     this.queue.checkLease(id, lease); await this.allowed(this.queue.get(id));
+    this.queue.checkLease(id, lease);
     return { name: file.name, mimetype: file.mimetype, data: data.toString('base64') };
   }
   async complete(id: string, lease: string, body: unknown) {
