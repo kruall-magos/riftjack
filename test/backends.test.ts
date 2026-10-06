@@ -58,7 +58,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         return send({ id, error: { code: -32600, message: 'failed to load configuration: invalid transport' } });
       }
     }
-    instructions = p.developerInstructions;
+    if (p.developerInstructions !== undefined) instructions = p.developerInstructions;
     return respond(id, { thread: { id: threadId }, model: 'resolved-model', reasoningEffort: 'medium', serviceTier: 'default', cwd: process.cwd() });
   }
   if (method === 'thread/inject_items') {
@@ -245,6 +245,9 @@ test('connector instructions are Codex developer instructions, not part of the u
   assert.match(f.calls().find(c => c.method === 'thread/start').params.developerInstructions, /conversation's outbox: ".*outbox"/);
   assert.ok(f.calls().find(c => c.method === 'thread/start').params.developerInstructions.includes(approvalInstructions('codex')));
   assert.equal(f.calls().find(c => c.method === 'turn/start').params.input[0].text, 'hello');
+  await f.backend('codex', 'continue', 'key', signal(), '@owner:test');
+  assert.equal(f.calls().find(c => c.method === 'thread/resume').params.developerInstructions, undefined);
+  assert.equal(f.calls().filter(c => c.method === 'thread/inject_items').length, 0);
 });
 
 test('existing Codex sessions receive approval judgment instructions once before the next model turn', async t => {
@@ -270,7 +273,7 @@ test('resuming a Codex conversation explicitly refreshes the attachment limit', 
   const start = f.calls().find(c => c.method === 'thread/start').params;
   const resume = f.calls().find(c => c.method === 'thread/resume').params;
   assert.match(start.developerInstructions, /20971520 bytes each/);
-  assert.match(resume.developerInstructions, /536870912 bytes each/);
+  assert.equal(resume.developerInstructions, undefined);
   assert.equal(resume.threadId, 'thread_1');
   assert.equal(resume.config.developer_instructions, undefined);
   const calls = f.calls();
