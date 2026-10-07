@@ -1,4 +1,5 @@
 import type { BackgroundAction } from './background-tasks.js';
+import type { RunJournal } from './run-journal.js';
 import type { CompactionPhase } from './compaction-notices.js';
 import { roomMessageDelivery, type MessageRequest, type RoomMessageTool } from './room-messages.js';
 import type { SendAttachments } from './attachment-delivery.js';
@@ -51,6 +52,7 @@ type Options = {
   acceptManagerAvatar?: (prompt: string, sender: string) => boolean;
   sendAttachments?: (room: string, event: MatrixEvent, files: OutgoingAttachment[], signal: AbortSignal) => Promise<void>;
   status?: (key: string) => string;
+  journal?: RunJournal;
   publish?: (input: unknown, signal: AbortSignal, interact: Interact, authorize: () => Promise<void>) => Promise<string>;
   background?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
   roomMessages?: (request: MessageRequest, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
@@ -234,7 +236,7 @@ export class Bridge {
         : current.controller.signal.aborted ? 'Cancelling' : current.running ? 'Running' : 'Preparing or delivering';
       const queued = current?.key === key ? `\nQueued follow-ups: ${current.followups.length}. Pending updates: ${current.buffered}.` : '';
       await o.reply(room, event, o.status(backendKey) + `\n\n**Task:** ${task}${queued}`
-        + (o.linkedSession ? `\nMessages queued across linked rooms: ${o.state.queued(o.botId)}.` : ''), true);
+        + (o.linkedSession ? `\nMessages queued across linked rooms: ${o.state.queued(o.botId)}.` : '') + (o.journal?.summary(key) ?? ''), true);
       return;
     }
     // Reads the account's limits without a model request, so it is allowed while a task runs.
@@ -284,12 +286,15 @@ export class Bridge {
       ready, markReady, publication: verb === 'publish', steering: Promise.resolve(), buffered: 0, followups: [], interactions: new Interactions() };
     this.active = current;
     let timedOut = false;
+    let runId: string | undefined;
+    let runStage: 'preparing' | 'running' | 'delivering' = 'preparing';
     const timeout = setTimeout(() => {
       if (controller.signal.aborted) return;
       timedOut = true;
       controller.abort();
     }, o.timeoutMs);
     try {
+      runId = o.journal?.begin(key, event.event_id);
       background?.admitted();
       if (verb === 'publish') await reply('Preparing the complete publication review…');
       else if (!feedback && !o.shared?.(room) && (verb === 'codex' || verb === 'claude')) await reply('…');
@@ -301,6 +306,8 @@ export class Bridge {
       while (next) {
         controller.signal.throwIfAborted();
         await this.authorize(room, current);
+        runStage = 'running';
+        if (runId) o.journal!.update(runId, runStage);
         current.running = true;
         const requestEvent = next.event;
         const turnLifetime = new AbortController();
@@ -376,6 +383,8 @@ export class Bridge {
         finally { turnLifetime.abort(); current.running = false; current.interactions.close(); }
         while (current.buffered) await current.steering;
         controller.signal.throwIfAborted();
+        runStage = 'delivering';
+        if (runId) o.journal!.update(runId, runStage);
         const command = next.prompt.startsWith('!'), responseEvent = next.event;
         const files = typeof result === 'string' ? [] : result.attachments;
         const mention = command ? undefined : o.mentions?.(room, typeof result === 'string' ? result : result.text);
@@ -402,9 +411,19 @@ export class Bridge {
           if (!quiet && mention?.error) await o.reply(room, responseEvent, mention.error);
         }
         while (current.buffered) await current.steering;
+        if (runId) o.journal!.update(runId, runStage, 'completed');
+        runId = undefined;
         next = current.followups.shift();
+        if (next) {
+          runStage = 'preparing';
+          runId = o.journal?.begin(key, next.event.event_id!);
+        }
       }
     } catch (error) {
+      if (runId) {
+        try { o.journal!.update(runId, runStage, controller.signal.aborted ? 'cancelled' : 'failed'); }
+        catch (journalError) { o.report(journalError); }
+      }
       current.failed = true;
       current.markReady();
       while (current.buffered) await current.steering;
