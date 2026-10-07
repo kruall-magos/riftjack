@@ -32,7 +32,10 @@ and `restore`. Edits require `expectedVersion` from a read; restore also needs
 before each operation; the tool expires at the end of the model task.
 Read-only bots may read notes, but cannot edit them with the tool.
 
-Notes are injected as reference data when the room or version changes. A failed
+Notes are injected as reference data when the room or version changes. Each
+snapshot includes the document version, text, last editor (`author`) and update
+time (`updatedAt`); this is document-level provenance, not authorship of every
+sentence. A failed
 initial turn does not mark them delivered; an accepted update does, even if the
 task later fails. Restart, reset and observed compaction cause
 them to be supplied again. Changing notes during a task takes effect on its next

@@ -74,10 +74,12 @@ test('context follows room and version, acknowledges snapshots, and resets after
   notes.set('!private:test', 'private reference', 0, '@alice:test');
   const first = notes.context('session', '!private:test');
   assert.match(first.text, /private reference/);
+  assert.deepEqual(JSON.parse(first.text.split('\n')[1]), { room: '!private:test', ...notes.read('!private:test') });
   assert.ok(notes.context('session', '!private:test').text); // no receipt yet
   first.delivered();
   assert.equal(notes.context('session', '!private:test').text, '');
   const shared = notes.context('session', '!shared:test');
+  assert.deepEqual(JSON.parse(shared.text.split('\n')[1]), { room: '!shared:test', version: 0, text: '', author: '', updatedAt: '' });
   assert.ok(!shared.text.includes('private reference')); shared.delivered();
   assert.match(notes.context('session', '!private:test').text, /private reference/);
   const old = notes.context('session', '!shared:test');
