@@ -108,7 +108,8 @@ Use `!tasks` for a local, read-only overview without a model request, including
 while the agent is busy. It shows up to 20 registrations from the current room,
 sender, thread and agent session: active entries first, newest registrations first
 within each group. Labels, IDs, delivery states and UTC due/expiry times are shown;
-recurring reminders include their last delivery, and finished watches include
+recurring reminders include their frequency, local time, IANA timezone, weekday
+for weekly schedules and last delivery, and finished watches include
 their observed status. Reminder text and status-file contents are not exposed.
 Linked sessions do not expose another room's registrations through this command.
 Recent finished records may have been pruned; this is not a complete execution

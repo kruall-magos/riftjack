@@ -164,7 +164,10 @@ export class BackgroundTasks {
       const kind = w.timer ? w.timer.schedule ? 'recurring reminder' : 'reminder' : 'watch';
       const timing = `${w.timer ? 'Due' : 'Expires'}: ${new Date(w.expires).toISOString()}`;
       const last = w.timer?.lastRun;
+      const schedule = w.timer?.schedule;
       return `${w.label} (${kind}; ${w.state})\nID: ${w.id}\n${timing}` +
+        (schedule ? `\nSchedule: ${schedule.frequency}, ${schedule.time} (${schedule.timezone})` +
+          (schedule.frequency === 'weekly' ? `, ${['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'][schedule.weekday! - 1]}` : '') : '') +
         (last ? `\nLast delivery: ${last.state} (${new Date(last.due).toISOString()})` : '') +
         (!w.timer && short(w.result, 80) ? `\nObserved status: ${w.result}` : '');
     });

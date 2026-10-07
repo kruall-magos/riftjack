@@ -44,6 +44,24 @@ test('task overview is read-only and isolates delivery scopes even with a shared
   assert.match(f.queue.overview({ ...target, session: undefined }), /No background/);
 });
 
+test('task overview displays persisted recurrence rules without mutating state or exposing reminder text', t => {
+  const f = setup(t);
+  const schedules = [
+    { frequency: 'daily', time: '09:00', timezone: 'America/New_York' },
+    { frequency: 'weekly', time: '18:30', timezone: 'Europe/Berlin', weekday: 7 },
+  ];
+  for (const schedule of schedules) f.queue.action({ action: 'remind', label: schedule.frequency,
+    message: 'Private recurring reminder', deliver: 'agent', schedule }, target, signal());
+  f.queue.action({ action: 'remind', label: 'One-time', message: 'Private one-time reminder', deliver: 'room', delay_minutes: 5 }, target, signal());
+  const before = readFileSync(f.file, 'utf8');
+  const text = new BackgroundTasks(f.file, f.root).overview(target);
+  assert.match(text, /Schedule: daily, 09:00 \(America\/New_York\)/);
+  assert.match(text, /Schedule: weekly, 18:30 \(Europe\/Berlin\), Sunday/);
+  assert.equal((text.match(/Schedule:/g) ?? []).length, 2);
+  assert.doesNotMatch(text, /Private recurring|Private one-time/);
+  assert.equal(readFileSync(f.file, 'utf8'), before);
+});
+
 test('task overview shows observed results and recurring delivery uncertainty without replaying work', async t => {
   const f = setup(t);
   f.queue.action(input, target, signal()); f.status('failed');
