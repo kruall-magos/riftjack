@@ -1,7 +1,9 @@
 import { routingInstructions } from '../src/routing-instructions.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync, realpathSync, symlinkSync, linkSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, realpathSync, symlinkSync, linkSync, readdirSync } from 'node:fs';
+import { Attachment } from '@matrix-org/matrix-sdk-crypto-nodejs';
+import { MatrixMedia } from '../src/media.js';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ConversationLinks, isSharedRoomState, MENTION_REPLY_LIMIT, mentionText, PEER_CREDIT } from '../src/conversation-links.js';
@@ -43,7 +45,10 @@ test('shared attachment retrieval checks the exact event, producer and live acce
   const action = linkedRoomMessages(f.links, bot, { event: message('Inspect the image'), key: canonical }, {
     allowed: async () => live, stopping: () => false, send: async () => { throw new Error('Retrieval must not send'); },
     read: async () => { reads++; if (revokeAt === 'read') live = false; return target; },
-    receive: async (_event, key) => { assert.equal(key, canonical); downloads++; if (revokeAt === 'download') live = false; return file; },
+    receive: async (_event, key, _signal, authorize) => {
+      assert.equal(key, canonical); downloads++; if (revokeAt === 'download') live = false;
+      await authorize(); return file;
+    },
   });
   const receive = () => action({ action: 'receive_attachment', room: group, event_id: '$image' }, signal);
   assert.deepEqual(JSON.parse(await receive()), { status: 'received', room: group, event_id: '$image', file });
@@ -60,6 +65,35 @@ test('shared attachment retrieval checks the exact event, producer and live acce
   live = false; const before = reads; await assert.rejects(receive()); assert.equal(reads, before);
   live = true; revokeAt = 'read'; await assert.rejects(receive()); assert.equal(downloads, 1);
   live = true; revokeAt = 'download'; await assert.rejects(receive()); assert.equal(downloads, 2);
+});
+
+test('shared encrypted downloads leave no plaintext when access or cancellation changes before writing', async t => {
+  for (const mode of ['revoked', 'cancelled'] as const) await t.test(mode, async t => {
+    const f = fixture(t), abort = new AbortController();
+    let live = true, downloaded = false;
+    const encrypted = Attachment.encrypt(Buffer.from('private attachment'));
+    const target: MatrixEvent = { ...message('private.txt', '$file', peer), room_id: group, content: {
+      msgtype: 'm.file', body: 'private.txt', file: { ...JSON.parse(encrypted.mediaEncryptionInfo!), url: 'mxc://test/file' },
+    } };
+    const media = new MatrixMedia({
+      mxcToHttp: async () => 'https://matrix.test/download', sendMessage: async () => { throw new Error('No sends expected'); },
+    }, {
+      workspace: f.dir, homeserver: 'https://matrix.test', accessToken: 'test', maxBytes: 1024, scope: bot,
+    }, async () => {
+      downloaded = true;
+      if (mode === 'revoked') live = false;
+      return new Response(new Uint8Array(encrypted.encryptedData));
+    });
+    const action = linkedRoomMessages(f.links, bot, { event: message('Get the attachment'), key: canonical }, {
+      allowed: async () => { if (downloaded && mode === 'cancelled') { await Promise.resolve(); abort.abort(); } return live; },
+      stopping: () => false, send: async () => { throw new Error('No sends expected'); },
+      read: async () => target,
+      receive: (event, key, signal, authorize) => media.receive(event.content!, key, signal, authorize),
+    });
+    await assert.rejects(action({ action: 'receive_attachment', room: group, event_id: '$file' }, abort.signal));
+    assert.equal(downloaded, true);
+    assert.deepEqual(readdirSync(f.dir, { recursive: true }).map(String).filter(name => name.includes('attachment-')), []);
+  });
 });
 
 test('linked file sends validate the batch and return partial receipts without replaying uncertain delivery', async t => {

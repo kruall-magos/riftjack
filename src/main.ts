@@ -209,7 +209,9 @@ async function main() {
       if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new PublicError('Invalid Grok worker token file.');
       const service = new WorkerService(queue, join(workerDir, 'uploads'), config.maxMediaBytes, {
         allowed: task => privateRoom(task.room, task.event.sender!),
-        receive: task => task.event.content?.file ? media.receive(task.event.content, task.conversation, AbortSignal.timeout(60_000)) : Promise.resolve(undefined),
+        receive: task => task.event.content?.file ? media.receive(task.event.content, task.conversation, AbortSignal.timeout(60_000), async () => {
+          if (stopping || !(await privateRoom(task.room, task.event.sender!))) throw new PublicError('Worker attachment withheld because access or room privacy changed.');
+        }) : Promise.resolve(undefined),
         prepare: async task => {
           const authorize = async () => {
             if (stopping || !(await privateRoom(task.room, task.event.sender!))) throw new PublicError('Worker reply withheld because access or room privacy changed.');
@@ -260,7 +262,7 @@ async function main() {
         allowed: privateRoom, stopping: () => stopping || restart.pending,
         send: (room, content) => client.sendMessage(room, content),
         read: reactionTarget,
-        receive: (event, key, signal) => media.receive(event.content!, key, signal),
+        receive: (event, key, signal, authorize) => media.receive(event.content!, key, signal, authorize),
         maxBytes: botConfig.maxMediaBytes,
         sendFiles: (room, files, signal, authorize) => media.send(room, files, undefined, signal, authorize),
       })(request, signal) : undefined,
@@ -353,7 +355,7 @@ async function main() {
           return '**Bot created:** ' + markdownText(created.name) + '\n\n' + managerBotList([created], requestedConfig.workspace) + '\n\nAccept the encrypted DM invitation and send a task.';
         } finally { creating = false; }
       },
-      receive: (event, key, signal) => media.receive(event.content!, key, signal),
+      receive: (event, key, signal, authorize) => media.receive(event.content!, key, signal, authorize),
       sendAttachments: (room, event, files, signal) => media.send(room, files, threadRelation(event), signal, async () => {
         if (!(await privateRoom(room, event.sender!))) throw new PublicError('Attachment withheld because this is no longer an encrypted DM with an allowed account.');
       }),

@@ -18,7 +18,7 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
     stopping(): boolean;
     send(room: string, content: { msgtype: 'm.text'; body: string; 'm.mentions': { user_ids: string[] }; [GRANT]?: string }): Promise<string>;
     read?(room: string, eventId: string): Promise<MatrixEvent | undefined>;
-    receive?(event: MatrixEvent, key: string, signal: AbortSignal): Promise<IncomingAttachment>;
+    receive?(event: MatrixEvent, key: string, signal: AbortSignal, authorize: () => Promise<void>): Promise<IncomingAttachment>;
     maxBytes?: number;
     sendFiles?(room: string, files: OutgoingAttachment[], signal: AbortSignal, authorize: () => Promise<void>): Promise<void>;
   }): MessageAction {
@@ -53,7 +53,7 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
           !isMedia(event.content?.msgtype) || !event.content?.file || event.content['m.relates_to']?.rel_type === 'm.replace') {
         throw new PublicError('No encrypted attachment found on that shared-room message.');
       }
-      const file = await transport.receive(event, context.key, signal);
+      const file = await transport.receive(event, context.key, signal, () => allowed(request.room));
       await allowed(request.room);
       return JSON.stringify({ status: 'received', room: request.room, event_id: request.event_id, file });
     }
