@@ -26,13 +26,18 @@ The connector reuses signing keys after network failures and restarts. It can re
 
 ## Private rooms
 
-Bots process messages and send replies, confirmations, attachments and restart
-notices only after checking the current room state. The room must use Megolm
+In ordinary private conversations, bots process messages and send replies,
+confirmations, attachments and restart notices only after checking the current
+room state. The room must use Megolm
 encryption, invite-only joining and `joined` history visibility, with exactly
 the bot and the allowed conversation partner joined. A third joined, invited or
 knocking member blocks the conversation. Rooms with `shared`, `invited` or
 `world_readable` history are not accepted. Set history visibility to “since they
 joined” in the Matrix client, or use a new DM created by the bot manager.
+
+[Configured shared rooms](shared-conversations.md) are an explicit exception to
+the two-person rule: they require exactly the linked human and two bots, with
+the same encryption, join and history settings and no extra invitations.
 
 These checks do not retract messages or encryption keys already delivered to
 other devices. Matrix membership changes and sends are separate server requests;
@@ -40,7 +45,7 @@ keep sensitive conversations in dedicated private rooms.
 
 ## Shared resources
 
-Conversation histories are scoped by bot, account, room, and thread. Bots still share the host OS account and the corresponding provider login. Bots assigned the same workspace can read and change the same files. Separate chats and per-bot access lists are not filesystem isolation. Use a separate OS account or container when you need that boundary.
+Ordinary conversation histories are scoped by bot, account, room, and thread. Session links intentionally reuse one agent history across its private and shared rooms; routing rules do not provide strict separation of what that model knows. Bots still share the host OS account and the corresponding provider login. Bots assigned the same workspace can read and change the same files. Separate chats and per-bot access lists are not filesystem isolation. Use a separate OS account or container when you need that boundary.
 
 Codex uses a workspace-write or read-only sandbox; command network access is disabled by default. The default on-request policy forwards exceptions to Matrix. Claude has its own permission model, described in [Claude Code](claude.md#permissions). Connector credentials are filtered from both backends’ subprocess environments.
 
@@ -55,3 +60,19 @@ conversation data; use SSH or HTTPS between machines. The listener is disabled
 by default and binds to loopback when enabled. Worker tools and approvals are
 controlled by the remote environment, not by Riftjack's local sandbox. See
 [worker setup and delivery guarantees](grok.md).
+
+## Authentication diagnostics
+
+Codex `account/read` internal errors and Claude's structured
+`authentication_failed` events include a fixed `Diagnostic` category in chat
+and the existing connector error log. Known messages distinguish loading auth,
+refresh-token failures, an account change, a missing Claude login, and Claude
+HTTP 401/403 responses. These are classifications of what the CLI reported,
+not independently verified causes. Unknown, malformed or oversized messages
+report `unclassified`; a generic RPC -32603 does not establish an auth failure.
+
+Raw RPC error text, error data and CLI stderr are not retained or forwarded.
+Categories contain no account identifiers, paths, tokens or response bodies.
+There is no automatic retry, token refresh, logout or conversation reset.
+After recovery, the original cause may remain unknown if the CLI message was
+not recognized. A restart restoring service is not proof of a permanent fix.
