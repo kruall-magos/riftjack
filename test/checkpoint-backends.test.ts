@@ -12,7 +12,7 @@ const fs = require('node:fs');
 const args = process.argv.slice(2), claude = !args.includes('app-server');
 const log = x => fs.appendFileSync(__filename+'.calls', JSON.stringify(x)+'\\n');
 const emit = x => console.log(JSON.stringify(x));
-if (args.includes('--help')) { console.log('--input-format --output-format --permission-mode --permission-prompt-tool --append-system-prompt --tools --settings --resume --replay-user-messages'); process.exit(0); }
+if (args.includes('--help')) { console.log('--input-format --output-format --permission-mode --permission-prompt-tool --append-system-prompt --tools --settings --resume --replay-user-messages --include-hook-events'); process.exit(0); }
 if (args[0]==='auth') { emit({loggedIn:true,authMethod:'claude.ai',apiProvider:'firstParty'}); process.exit(0); }
 const threadId='session', turnId='turn'; let mode, started=false;
 const usage = foreign => claude
@@ -26,13 +26,14 @@ const compact = () => {
   emit({type:'system',subtype:'status',status:'compacting',session_id:threadId});
   const hook = () => {
    if(mode.includes('nohook'))return;
+   if(!args.includes('--include-hook-events'))throw Error('Missing hook events flag');
    const settings=JSON.parse(args[args.indexOf('--settings')+1]);
    const command=settings.hooks.SessionStart[0].hooks[0].command;
    const result=require('node:child_process').spawnSync('/bin/sh',['-c',command],{input:JSON.stringify({hook_event_name:'SessionStart',source:'compact',session_id:threadId}),encoding:'utf8'});
    if(result.status!==0)throw Error(result.stderr);
    const text=JSON.parse(result.stdout).hookSpecificOutput.additionalContext;
    log({notice:text,delivery:'hook'});
-   emit({type:'system',subtype:'hook_response',hook_event:'SessionStart',exit_code:0,stdout:result.stdout,session_id:threadId});
+   emit({type:'system',subtype:'hook_response',hook_event:'SessionStart',exit_code:0,outcome:'success',stdout:result.stdout,session_id:threadId});
   };
   if(!mode.includes('after'))hook();
   emit({type:'system',subtype:'compact_boundary',session_id:threadId});

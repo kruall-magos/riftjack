@@ -119,7 +119,10 @@ in the agent's note, not in connector code. The helper is included in code
 snapshots and runs with the same Node executable as the connector.
 
 An observed start/completion pair also records a pending restore reminder.
-Confirmed matching hook output clears it. If hooks are disabled or fail,
+On CLIs advertising `--include-hook-events`, Riftjack requests hook events;
+matching output with exit code zero and outcome `success` clears the reminder.
+Without those events delivery remains uncertain and the fallback may repeat it.
+If hooks are disabled or fail,
 Claude falls back to live steering after the next assistant event (which can
 be later than the first continuation), or the next ordinary input. Codex uses
 live steering, without a first-continuation ordering guarantee. Unaccepted or
