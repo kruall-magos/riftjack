@@ -34,6 +34,8 @@ import { Access, parseAccessRequest } from './access.js';
 import { manageBotAccess, parseBotAccessRequest } from './bot-access.js';
 import { BotInvitations } from './bot-invitations.js';
 import { MatrixMedia } from './media.js';
+import { AudioTranscriber } from './audio-transcription.js';
+import { AudioConfigurationWarnings } from './audio-notice.js';
 import { CONFIG_EXIT_CODE, RestartController } from './restart.js';
 import { RestartNotice } from './restart-notice.js';
 import { checkClaude, claudeUsage } from './claude-backend.js';
@@ -66,7 +68,10 @@ async function main() {
   let config: Config;
   try { config = loadConfig(); } catch (error) { console.error((error as Error).message); process.exitCode = CONFIG_EXIT_CODE; return; }
   notifySupervisor({ type: 'connector-config', dataDir: config.dataDir });
-  if (process.argv.includes('--check-config')) { console.log('Configuration is valid. No network requests were made.'); return; }
+  if (process.argv.includes('--check-config')) {
+    if (config.audioTranscriptionWarning) console.warn(config.audioTranscriptionWarning);
+    console.log('Configuration is valid. No network requests were made.'); return;
+  }
   if (process.argv.includes('--check-claude')) { await checkClaude(config); console.log('Claude Code supports the required CLI options and reports a Claude account login. No model request was made.'); return; }
   mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
   try { lockInstance(config.dataDir); }
@@ -79,6 +84,21 @@ async function main() {
   }
   if (config.sshTunnel) tunnel = new SshTunnel(config.sshTunnel, { report: message => console.log(message) });
   const accounts = new Accounts(join(config.dataDir, 'accounts.json'));
+  const audioWarnings = new AudioConfigurationWarnings();
+  let audio = config.audioTranscription ? new AudioTranscriber(config.audioTranscription) : undefined;
+  const checkAudio = (candidate: Config) => {
+    if (candidate.audioTranscriptionWarning) {
+      audio = undefined;
+      audioWarnings.add(candidate.audioTranscriptionWarning);
+      console.warn(candidate.audioTranscriptionWarning);
+    }
+  };
+  checkAudio(config);
+  // Check every saved workspace before any bot can invoke the shared recognizer.
+  for (const account of accounts.list()) {
+    try { checkAudio(configForWorkspace(config, account.workspace)); }
+    catch { /* Invalid workspace is reported by startAccount; unrelated bots can still start. */ }
+  }
   const access = new Access(join(config.dataDir, 'allowed-users.json'), config.owner);
   if (process.argv.includes('--bootstrap-codex') || process.argv.includes('--bootstrap-claude') || process.argv.includes('--bootstrap-grok')) {
     for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => {
@@ -161,6 +181,7 @@ async function main() {
     let phaseStart = startedAt;
     const phase = (name: string) => { const now = performance.now(); phases[name] = Math.round(now - phaseStart); phaseStart = now; };
     const botConfig = configForWorkspace(config, account.workspace);
+    checkAudio(botConfig);
     const currentConfig = () => withEngineSettings(botConfig, accounts.list().find(a => a.userId === account.userId) ?? account);
     const backend = createBackend(currentConfig, state);
     const dir = join(config.dataDir, 'bots', createHash('sha256').update(account.userId).digest('hex'));
@@ -211,8 +232,11 @@ async function main() {
       const token = readFileSync(tokenFile, 'utf8').trim();
       if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new PublicError('Invalid Grok worker token file.');
       const service = new WorkerService(queue, join(workerDir, 'uploads'), config.maxMediaBytes, {
+        transcribe: (file, signal) => audio ? audio.transcribe(file, signal) : Promise.resolve(file),
         allowed: task => privateRoom(task.room, task.event.sender!),
-        receive: task => task.event.content?.file ? media.receive(task.event.content, task.conversation, AbortSignal.timeout(60_000)) : Promise.resolve(undefined),
+        receive: task => task.event.content?.file ? media.receive(task.event.content, task.conversation, AbortSignal.timeout(60_000), async () => {
+          if (stopping || !(await privateRoom(task.room, task.event.sender!))) throw new PublicError('Worker attachment withheld because access or room privacy changed.');
+        }) : Promise.resolve(undefined),
         prepare: async task => {
           const authorize = async () => {
             if (stopping || !(await privateRoom(task.room, task.event.sender!))) throw new PublicError('Worker reply withheld because access or room privacy changed.');
@@ -272,6 +296,10 @@ async function main() {
       roomMessages: linkedAgent ? (request, context, signal) => linkedRoomMessages(links, account.userId, context, {
         allowed: privateRoom, stopping: () => stopping || restart.pending,
         send: (room, content) => client.sendMessage(room, content),
+        read: reactionTarget,
+        receive: (event, key, signal, authorize) => media.receive(event.content!, key, signal, authorize),
+        maxBytes: botConfig.maxMediaBytes,
+        sendFiles: (room, files, signal, authorize) => media.send(room, files, undefined, signal, authorize),
       })(request, signal) : undefined,
       mentions: linkedAgent ? (room, text) => links.mentions(account.userId, room, text) : undefined,
       shared: linkedAgent ? room => !!links.room(account.userId, room) : undefined,
@@ -362,7 +390,8 @@ async function main() {
           return '**Bot created:** ' + markdownText(created.name) + '\n\n' + managerBotList([created], requestedConfig.workspace) + '\n\nAccept the encrypted DM invitation and send a task.';
         } finally { creating = false; }
       },
-      receive: (event, key, signal) => media.receive(event.content!, key, signal),
+      receive: (event, key, signal, authorize) => media.receive(event.content!, key, signal, authorize),
+      transcribe: (file, signal) => audio ? audio.transcribe(file, signal) : Promise.resolve(file),
       sendAttachments: (room, event, files, signal) => media.send(room, files, threadRelation(event), signal, async () => {
         if (!(await privateRoom(room, event.sender!))) throw new PublicError('Attachment withheld because this is no longer an encrypted DM with an allowed account.');
       }),
@@ -496,6 +525,20 @@ async function main() {
     if (stopping || restart.pending || notifyingRestart) return;
     notifyingRestart = true;
     try {
+      const targets = accounts.list().sort((a, b) => Number(b.kind === 'manager') - Number(a.kind === 'manager'));
+      await audioWarnings.deliver(targets.flatMap(account => {
+        const started = clients.get(account.userId);
+        const room = links.agent(account.userId)?.home ?? account.roomId;
+        if (!started || !room) return [];
+        const { client } = started;
+        return [{
+          allowed: async () => !stopping && !restart.pending &&
+            await isPrivateRoom(client, room, account.userId, access.owner,
+              sender => sender === access.owner && access.has(sender, account.kind === 'manager' ? undefined : account.userId)) &&
+            !stopping && !restart.pending,
+          send: (body: string) => client.sendMessage(room, { msgtype: 'm.notice', body, [SERVICE]: true, 'm.mentions': {} }),
+        }];
+      }));
       await restartNotice.deliver({
         isOwner: sender => sender === access.owner && access.has(sender),
         manager: () => {
