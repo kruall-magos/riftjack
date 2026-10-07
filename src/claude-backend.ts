@@ -1,6 +1,6 @@
 import { routingInstructions } from './routing-instructions.js';
 import { compactionNotices } from './compaction-notices.js';
-import { contextCheckpoints, checkpointDelivery, checkpointInstructions } from './context-checkpoints.js';
+import { contextCheckpoints, checkpointDelivery, checkpointInstructions, claudeCheckpointHooks } from './context-checkpoints.js';
 import { startBackgroundMcp, BACKGROUND_SERVER, BACKGROUND_TOOL, backgroundInstructions } from './background-mcp.js';
 import { attachmentDelivery } from './attachment-delivery.js';
 import { startAttachmentMcp, ATTACHMENT_SERVER, ATTACHMENT_TOOL } from './attachment-mcp.js';
@@ -158,6 +158,7 @@ export function claudeArguments(config: Config, session?: string, interactive = 
   const readOnly = config.sandbox === 'read-only';
   const tools = readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash';
   const settings = {
+    hooks: claudeCheckpointHooks(config.workspace),
     // Sandboxed Bash skips this blanket ask rule in auto-allow mode. Outside the
     // sandbox it takes precedence over saved allow rules, including exclusions.
     permissions: { ask: ['Bash'] },
@@ -332,7 +333,16 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
         }
         if (message.subtype === 'compact_boundary' && compacting) {
           compactions.complete(String(compactId)); compacting = false;
-          checkpoint?.complete(); checkpointSender?.flush();
+          // The synchronous compact hook supplies the first continuation. Do
+          // not race it with stdin steering. If it fails, retain the advisory
+          // for the next assistant event or next ordinary input.
+          checkpoint?.complete();
+        }
+        if (message.subtype === 'hook_response' && message.hook_event === 'SessionStart' && message.exit_code === 0) {
+          try {
+            const output = JSON.parse(message.stdout);
+            if (output.hookSpecificOutput?.hookEventName === 'SessionStart') checkpoint?.restored(output.hookSpecificOutput.additionalContext);
+          } catch { /* unrelated hook output does not acknowledge our notice */ }
         }
         // A null status also occurs for permission-mode changes; it is not
         // evidence that compaction succeeded. Only compact_boundary is.
