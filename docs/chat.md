@@ -275,8 +275,9 @@ Files are kept under each bot’s workspace in `.matrix-media/`, in separate inc
 
 ## Task activity indicator
 
-Codex, Claude and Bot Manager show the standard Matrix typing indicator during
-an active task, including tool calls, preparation and final delivery. Local
+For Codex, Claude and Bot Manager, “typing” means the bot is processing a request
+or awaiting confirmation within that request. The standard Matrix indicator
+covers an active task, including tool calls, preparation and final delivery. Local
 commands such as `!status` do not start it. The connector renews the indicator
 every 15 seconds with a 30-second server expiry and clears it on completion,
 cancellation or failure. After a crash it expires without a cleanup request.
