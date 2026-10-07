@@ -39,8 +39,12 @@ with `action: "receive_attachment"`, `room` and the exact message `event_id`
 image, file or audio attachment from the configured owner or an agent of that
 shared room. Retrieval is restricted to configured shared rooms; it does not
 search arbitrary rooms or open another agent's workspace. The connector checks
-access before reading the event, before downloading and before returning the
-result. The existing media size, homeserver and decryption checks apply.
+access before reading the event, before downloading and after decryption, just
+before writing the local file. Revocation at that last check prevents the write;
+once the file is saved, retrieval returns success even if access changes later.
+This does not promise instantaneous revocation. Failed or cancelled writes remove
+the file created by that attempt. The existing media size, homeserver and
+decryption checks apply.
 
 The result includes `file.path`, `name`, `mimetype`, `size` and `image`. Images
 are not automatically injected into the model's input; the agent must inspect

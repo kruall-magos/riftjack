@@ -1,7 +1,7 @@
 import { routingInstructions } from '../src/routing-instructions.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync, realpathSync, symlinkSync, linkSync, readdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, realpathSync, symlinkSync, linkSync, readdirSync, readFileSync } from 'node:fs';
 import { Attachment } from '@matrix-org/matrix-sdk-crypto-nodejs';
 import { MatrixMedia } from '../src/media.js';
 import { join } from 'node:path';
@@ -94,6 +94,37 @@ test('shared encrypted downloads leave no plaintext when access or cancellation 
     assert.equal(downloaded, true);
     assert.deepEqual(readdirSync(f.dir, { recursive: true }).map(String).filter(name => name.includes('attachment-')), []);
   });
+});
+
+test('a completed shared download returns its receipt when access changes after writing', async t => {
+  const f = fixture(t), signal = new AbortController().signal;
+  let live = true;
+  const data = Buffer.from('shared attachment');
+  const encrypted = Attachment.encrypt(data);
+  const target: MatrixEvent = { ...message('shared.txt', '$file', peer), room_id: group, content: {
+    msgtype: 'm.file', body: 'shared.txt', file: { ...JSON.parse(encrypted.mediaEncryptionInfo!), url: 'mxc://test/file' },
+  } };
+  const media = new MatrixMedia({
+    mxcToHttp: async () => 'https://matrix.test/download', sendMessage: async () => { throw new Error('No sends expected'); },
+  }, {
+    workspace: f.dir, homeserver: 'https://matrix.test', accessToken: 'test', maxBytes: 1024, scope: bot,
+  }, async () => new Response(new Uint8Array(encrypted.encryptedData)));
+  const action = linkedRoomMessages(f.links, bot, { event: message('Get the attachment'), key: canonical }, {
+    allowed: async () => live, stopping: () => false, send: async () => { throw new Error('No sends expected'); },
+    read: async () => target,
+    receive: async (event, key, signal, authorize) => {
+      const file = await media.receive(event.content!, key, signal, authorize);
+      assert.deepEqual(readFileSync(file.path), data);
+      live = false;
+      return file;
+    },
+  });
+  const request = { action: 'receive_attachment' as const, room: group, event_id: '$file' };
+  const result = JSON.parse(await action(request, signal));
+  assert.equal(result.status, 'received');
+  assert.deepEqual(readFileSync(result.file.path), data);
+  // Revocation still prevents any subsequent retrieval.
+  await assert.rejects(action(request, signal), /privacy changed/);
 });
 
 test('linked file sends validate the batch and return partial receipts without replaying uncertain delivery', async t => {

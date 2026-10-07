@@ -54,7 +54,8 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
         throw new PublicError('No encrypted attachment found on that shared-room message.');
       }
       const file = await transport.receive(event, context.key, signal, () => allowed(request.room));
-      await allowed(request.room);
+      // receive authorizes immediately before exposing plaintext. Once saved,
+      // return its receipt: a later revocation cannot undo that completed read.
       return JSON.stringify({ status: 'received', room: request.room, event_id: request.event_id, file });
     }
     if (request.action === 'send_files') {
