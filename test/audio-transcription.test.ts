@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { AudioTranscriber, loadAudioConfig } from '../src/audio-transcription.js';
 import { configForWorkspace } from '../src/workspace.js';
 import { loadConfig } from '../src/config.js';
+import { spawnSync } from 'node:child_process';
+import { AudioConfigurationWarnings } from '../src/audio-notice.js';
 
 function fixture(t: { after(fn: () => void): void }, engine = '', decoder = '') {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'audio-test-')));
@@ -31,6 +33,56 @@ function fixture(t: { after(fn: () => void): void }, engine = '', decoder = '') 
 }
 const signal = () => new AbortController().signal;
 
+test('bad optional audio configuration leaves ordinary connector configuration usable', t => {
+  const f = fixture(t);
+  const base = { MATRIX_HOMESERVER: 'https://matrix.test', MATRIX_OWNER_ID: '@alice:test', RIFTJACK_WORKSPACE: process.cwd() };
+  for (const patch of [
+    { AUDIO_TRANSCRIBE_MODEL: join(f.root, 'missing-model') },
+    { AUDIO_TRANSCRIBE_MODEL: f.config.model, AUDIO_TRANSCRIBE_PATH: join(f.root, 'missing-cli') },
+    { AUDIO_TRANSCRIBE_MODEL: f.config.model, AUDIO_TRANSCRIBE_PATH: f.config.executable, AUDIO_FFMPEG_PATH: join(f.root, 'missing-ffmpeg') },
+    { AUDIO_TRANSCRIBE_MODEL: f.config.model, AUDIO_TRANSCRIBE_PATH: f.config.executable, AUDIO_FFMPEG_PATH: f.config.ffmpeg, AUDIO_MAX_SECONDS: '0' },
+  ]) {
+    const config = loadConfig({ ...base, ...patch });
+    assert.equal(config.audioTranscription, undefined);
+    assert.match(config.audioTranscriptionWarning!, /disabled/);
+    assert.equal(config.owner, base.MATRIX_OWNER_ID);
+    assert.ok(!config.audioTranscriptionWarning!.includes(f.root));
+  }
+  const disabled = loadConfig({ ...base, AUDIO_TRANSCRIBE_PATH: '/missing', AUDIO_MAX_SECONDS: 'invalid' });
+  assert.equal(disabled.audioTranscription, undefined);
+  assert.equal(disabled.audioTranscriptionWarning, undefined);
+  assert.throws(() => loadConfig({ ...base, MATRIX_OWNER_ID: 'invalid' }));
+});
+
+test('real configuration entry point warns but exits successfully for missing optional audio tools', () => {
+  const result = spawnSync(process.execPath, ['--import', 'tsx', 'src/main.ts', '--check-config'], {
+    env: { MATRIX_HOMESERVER: 'https://matrix.test', MATRIX_OWNER_ID: '@alice:test', RIFTJACK_WORKSPACE: process.cwd(),
+      AUDIO_TRANSCRIBE_MODEL: '/nonexistent-riftjack-test/model.gguf', PATH: '/nonexistent-riftjack-test' },
+    encoding: 'utf8', timeout: 10_000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /Audio transcription is disabled/);
+  assert.match(result.stdout, /Configuration is valid/);
+});
+
+test('audio warnings wait for an owner DM, deduplicate, and do not retry uncertain sends', async () => {
+  const warnings = new AudioConfigurationWarnings(), sent: string[] = [];
+  warnings.add('Missing optional model'); warnings.add('Missing optional model');
+  const target = { allowed: async () => false, send: async (text: string) => { sent.push(text); } };
+  await warnings.deliver([target]);
+  assert.deepEqual(sent, []);
+  await warnings.deliver([target, { ...target, allowed: async () => true }]);
+  await warnings.deliver([{ ...target, allowed: async () => true }]);
+  assert.deepEqual(sent, ['Missing optional model']);
+  warnings.add('Missing decoder');
+  let attempts = 0;
+  const uncertain = { allowed: async () => true, send: async () => { ++attempts; throw new Error('lost receipt'); } };
+  await assert.rejects(warnings.deliver([uncertain]), /lost receipt/);
+  warnings.add('Missing decoder');
+  await warnings.deliver([uncertain]);
+  assert.equal(attempts, 1);
+});
+
 test('optional configuration validates trusted paths, bounds and custom bot workspaces', t => {
   const f = fixture(t), workspace = join(f.root, 'workspace');
   assert.equal(loadAudioConfig({}, workspace), undefined);
@@ -42,7 +94,9 @@ test('optional configuration validates trusted paths, bounds and custom bot work
   }
   assert.throws(() => loadAudioConfig(env, f.root), /outside/);
   const config = loadConfig({ MATRIX_HOMESERVER: 'https://matrix.test', MATRIX_OWNER_ID: '@alice:test', RIFTJACK_WORKSPACE: f.root });
-  assert.throws(() => configForWorkspace({ ...config, audioTranscription: f.config }), /outside/);
+  const isolated = configForWorkspace({ ...config, audioTranscription: f.config });
+  assert.equal(isolated.audioTranscription, undefined);
+  assert.match(isolated.audioTranscriptionWarning!, /outside/);
 });
 
 test('local audio becomes labelled automatic transcription without passing connector secrets', async t => {

@@ -19,7 +19,13 @@ AUDIO_MAX_SECONDS=300
 AUDIO_TIMEOUT_SECONDS=120
 ```
 
-A blank `AUDIO_TRANSCRIBE_MODEL` disables the feature. All three paths must be
+A blank `AUDIO_TRANSCRIBE_MODEL` disables the feature. Missing or invalid audio
+settings also disable transcription without stopping the connector. The startup
+log and an available owner DM receive a warning explaining what to fix; the
+original audio remains available. `--check-config` prints this warning but succeeds
+if the rest of the configuration is valid. After correcting the settings, restart
+the connector to enable transcription. A path inside any bot workspace disables
+the shared recognizer for all bots until restart. All three paths must be
 absolute, regular files outside every agent workspace; executables must be
 executable. Configure them on the connector host, not through an agent tool.
 Native library dependencies must also be installed outside writable workspaces.

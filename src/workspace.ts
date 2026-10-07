@@ -25,7 +25,13 @@ export function resolveWorkspace(path: string, base: string): string {
 
 export function configForWorkspace(config: Config, workspace?: string): Config {
   const selected = workspace === undefined ? config : { ...config, workspace: resolveWorkspace(workspace, config.workspace) };
-  if (selected.audioTranscription) audioOutsideWorkspace(selected.audioTranscription, selected.workspace);
+  if (selected.audioTranscription) {
+    try { audioOutsideWorkspace(selected.audioTranscription, selected.workspace); }
+    catch {
+      return { ...selected, audioTranscription: undefined,
+        audioTranscriptionWarning: 'Audio transcription is disabled: its files must be outside every agent workspace. Original audio attachments remain available. Move the transcription files and restart to enable transcription.' };
+    }
+  }
   return selected;
 }
 

@@ -20,10 +20,14 @@ export function loadAudioConfig(env: NodeJS.ProcessEnv, workspace: string): Audi
   const file = (name: string, executable = false) => {
     const value = env[name]?.trim();
     if (!value || !isAbsolute(value)) throw new Error(`${name} must be an absolute path.`);
-    const path = realpathSync(value);
-    if (!statSync(path).isFile()) throw new Error(`${name} must be a regular file.`);
-    accessSync(path, executable ? constants.X_OK : constants.R_OK);
-    return path;
+    try {
+      const path = realpathSync(value);
+      if (!statSync(path).isFile()) throw new Error('not a file');
+      accessSync(path, executable ? constants.X_OK : constants.R_OK);
+      return path;
+    } catch {
+      throw new Error(`${name} must point to an accessible ${executable ? 'executable' : 'readable'} regular file.`);
+    }
   };
   const number = (name: string, fallback: number, maximum: number) => {
     const value = Number(env[name] || fallback);
@@ -35,6 +39,16 @@ export function loadAudioConfig(env: NodeJS.ProcessEnv, workspace: string): Audi
     timeoutMs: number('AUDIO_TIMEOUT_SECONDS', 120, 600) * 1000 };
   audioOutsideWorkspace(config, workspace);
   return config;
+}
+
+// Invalid optional configuration must not prevent the connector from starting.
+export function optionalAudioConfig(env: NodeJS.ProcessEnv, workspace: string): {
+  audioTranscription?: AudioConfig; audioTranscriptionWarning?: string;
+} {
+  try { return { audioTranscription: loadAudioConfig(env, workspace) }; }
+  catch (error) {
+    return { audioTranscriptionWarning: `Audio transcription is disabled: ${(error as Error).message} Original audio attachments remain available. Fix the audio settings and restart to enable transcription.` };
+  }
 }
 
 // No shell, no inherited connector credentials, and no input filenames from Matrix.
