@@ -2,6 +2,7 @@ import { realpathSync, statSync, accessSync, mkdirSync, constants } from 'node:f
 import { homedir } from 'node:os';
 import { resolve, dirname, basename, join } from 'node:path';
 import type { Config } from './config.js';
+import { audioOutsideWorkspace } from './audio-transcription.js';
 import { PublicError } from './errors.js';
 import type { Interact } from './interactions.js';
 
@@ -23,7 +24,9 @@ export function resolveWorkspace(path: string, base: string): string {
 }
 
 export function configForWorkspace(config: Config, workspace?: string): Config {
-  return workspace === undefined ? config : { ...config, workspace: resolveWorkspace(workspace, config.workspace) };
+  const selected = workspace === undefined ? config : { ...config, workspace: resolveWorkspace(workspace, config.workspace) };
+  if (selected.audioTranscription) audioOutsideWorkspace(selected.audioTranscription, selected.workspace);
+  return selected;
 }
 
 // Resolve existing ancestors too, so the confirmation shows the actual destination.

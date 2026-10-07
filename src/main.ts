@@ -32,6 +32,7 @@ import { Access, parseAccessRequest } from './access.js';
 import { manageBotAccess, parseBotAccessRequest } from './bot-access.js';
 import { BotInvitations } from './bot-invitations.js';
 import { MatrixMedia } from './media.js';
+import { AudioTranscriber } from './audio-transcription.js';
 import { CONFIG_EXIT_CODE, RestartController } from './restart.js';
 import { RestartNotice } from './restart-notice.js';
 import { checkClaude, claudeUsage } from './claude-backend.js';
@@ -66,6 +67,7 @@ async function main() {
   notifySupervisor({ type: 'connector-config', dataDir: config.dataDir });
   if (process.argv.includes('--check-config')) { console.log('Configuration is valid. No network requests were made.'); return; }
   if (process.argv.includes('--check-claude')) { await checkClaude(config); console.log('Claude Code supports the required CLI options and reports a Claude account login. No model request was made.'); return; }
+  const audio = config.audioTranscription ? new AudioTranscriber(config.audioTranscription) : undefined;
   mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
   try { lockInstance(config.dataDir); }
   catch (error) {
@@ -208,6 +210,7 @@ async function main() {
       const token = readFileSync(tokenFile, 'utf8').trim();
       if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new PublicError('Invalid Grok worker token file.');
       const service = new WorkerService(queue, join(workerDir, 'uploads'), config.maxMediaBytes, {
+        transcribe: audio ? (file, signal) => audio.transcribe(file, signal) : undefined,
         allowed: task => privateRoom(task.room, task.event.sender!),
         receive: task => task.event.content?.file ? media.receive(task.event.content, task.conversation, AbortSignal.timeout(60_000)) : Promise.resolve(undefined),
         prepare: async task => {
@@ -350,6 +353,7 @@ async function main() {
         } finally { creating = false; }
       },
       receive: (event, key, signal) => media.receive(event.content!, key, signal),
+      transcribe: audio ? (file, signal) => audio.transcribe(file, signal) : undefined,
       sendAttachments: (room, event, files, signal) => media.send(room, files, threadRelation(event), signal, async () => {
         if (!(await privateRoom(room, event.sender!))) throw new PublicError('Attachment withheld because this is no longer an encrypted DM with an allowed account.');
       }),
