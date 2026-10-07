@@ -1,12 +1,13 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { WorkerError, WorkerQueue, type WorkerTask, type WorkerFile } from './worker-queue.js';
-import { safeName, type IncomingAttachment } from './media.js';
+import { readOutgoing, safeName, type IncomingAttachment } from './media.js';
 
 export type WorkerTransport = {
   allowed: (task: WorkerTask) => Promise<boolean>;
   receive: (task: WorkerTask) => Promise<IncomingAttachment | undefined>;
+  transcribe?: (file: IncomingAttachment, signal: AbortSignal) => Promise<IncomingAttachment>;
   prepare: (task: WorkerTask) => Promise<unknown[]>;
   send: (task: WorkerTask, transaction: string, encrypted: unknown) => Promise<void>;
   report: (error: unknown) => void;
@@ -14,9 +15,11 @@ export type WorkerTransport = {
 export class WorkerService {
   private delivering = false;
   private stopped = false;
+  private controller = new AbortController();
+  private downloads = new Map<string, Promise<IncomingAttachment>>();
   constructor(readonly queue: WorkerQueue, private files: string, readonly maxBytes: number, private transport: WorkerTransport) {}
   get busy() { return this.delivering; }
-  stop() { this.stopped = true; }
+  stop() { this.stopped = true; this.controller.abort(); }
   private async allowed(task: WorkerTask) {
     if (this.stopped) throw new WorkerError(503, 'Connector is stopping.');
     const allowed = await this.transport.allowed(task);
@@ -52,12 +55,31 @@ export class WorkerService {
     return { released: true };
   }
   async attachment(id: string, lease: string) {
-    const task = this.queue.checkLease(id, lease); await this.allowed(task);
-    const file = await this.transport.receive(task);
-    // Revocation/expiry during the download must not disclose its contents.
-    this.queue.checkLease(id, lease); await this.allowed(task);
-    if (!file) throw new WorkerError(404, 'This task has no attachment.');
-    return { name: file.name, mimetype: file.mimetype, data: readFileSync(file.path).toString('base64') };
+    let task = this.queue.checkLease(id, lease); await this.allowed(task);
+    task = this.queue.checkLease(id, lease);
+    let download = this.downloads.get(id);
+    if (!task.attachment && !download) {
+      download = (async () => {
+        let file = await this.transport.receive(task);
+        this.queue.checkLease(id, lease); await this.allowed(task);
+        if (!file) throw new WorkerError(404, 'This task has no attachment.');
+        if (this.transport.transcribe) {
+          file = await this.transport.transcribe(file, this.controller.signal);
+          this.queue.checkLease(id, lease); await this.allowed(task);
+        }
+        this.queue.cacheAttachment(id, lease, file);
+        return file;
+      })();
+      this.downloads.set(id, download);
+      void download.finally(() => { if (this.downloads.get(id) === download) this.downloads.delete(id); }).catch(() => {});
+    }
+    const file = task.attachment ?? await download!;
+    const data = await readOutgoing({ path: file.path, root: dirname(file.path) }, this.maxBytes);
+    // Cached reads still require a live lease and current room authorization.
+    this.queue.checkLease(id, lease); await this.allowed(this.queue.get(id));
+    this.queue.checkLease(id, lease);
+    return { name: file.name, mimetype: file.mimetype, data: data.toString('base64'),
+      ...(file.transcription && { transcription: file.transcription }) };
   }
   async complete(id: string, lease: string, body: unknown) {
     if (!body || typeof body !== 'object') throw new WorkerError(400, 'Expected a reply object.');

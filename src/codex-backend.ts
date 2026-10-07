@@ -1,5 +1,6 @@
 import { routingInstructions } from './routing-instructions.js';
 import { compactionNotices } from './compaction-notices.js';
+import { contextCheckpoints, checkpointDelivery, checkpointInstructions } from './context-checkpoints.js';
 import { startBackgroundMcp, BACKGROUND_SERVER, backgroundInstructions } from './background-mcp.js';
 import { attachmentDelivery } from './attachment-delivery.js';
 import { startAttachmentMcp, ATTACHMENT_SERVER } from './attachment-mcp.js';
@@ -11,6 +12,7 @@ import type { Config } from './config.js';
 import type { Backend, Steer } from './bridge.js';
 import type { State } from './state.js';
 import { PublicError } from './accounts.js';
+import { OwnerDiagnosticError } from './errors.js';
 import { mediaInstructions, outboxDirectory, parseMediaReply, type IncomingAttachment } from './media.js';
 import { AppServer, RpcError, type AgentMessage, type CodexInput, type Turn } from './app-server.js';
 import { codexInteraction } from './codex-interactions.js';
@@ -66,6 +68,10 @@ export function createCodexBackend(configuration: Config | (() => Config), state
     let progress = Promise.resolve();
     const sentProgress = new Set<string>();
     const compactions = compactionNotices(hooks?.compaction);
+    let checkpoint: ReturnType<typeof contextCheckpoints> | undefined;
+    let checkpointSender: ReturnType<typeof checkpointDelivery> | undefined;
+    const seenCompactions = new Set<string>();
+    let compactingId: string | undefined;
     let background: Awaited<ReturnType<typeof startBackgroundMcp>> | undefined;
     let publication: Awaited<ReturnType<typeof startPublishMcp>> | undefined;
     let media: Awaited<ReturnType<typeof startAttachmentMcp>> | undefined;
@@ -93,9 +99,21 @@ export function createCodexBackend(configuration: Config | (() => Config), state
         const p = notification.params;
         if (p?.threadId !== current.threadId) return;
         if (notification.method === 'turn/started' && p.turn) current.turnId = p.turn.id;
+        if (!current.ended && p.turnId === current.turnId && notification.method === 'thread/tokenUsage/updated') {
+          checkpoint?.usage(p.tokenUsage?.last?.totalTokens, p.tokenUsage?.modelContextWindow);
+          checkpointSender?.flush();
+        }
         if (!current.ended && p.turnId === current.turnId && p.item?.type === 'contextCompaction') {
-          if (notification.method === 'item/started') compactions.start(p.item.id);
-          if (notification.method === 'item/completed') compactions.complete(p.item.id);
+          if (notification.method === 'item/started') {
+            compactions.start(p.item.id);
+            if (!seenCompactions.has(p.item.id)) {
+              seenCompactions.add(p.item.id); compactingId = p.item.id; checkpoint?.start();
+            }
+          }
+          if (notification.method === 'item/completed') {
+            compactions.complete(p.item.id);
+            if (compactingId === p.item.id) { compactingId = undefined; checkpoint?.complete(); checkpointSender?.flush(); }
+          }
         }
         if ((notification.method === 'item/started' || notification.method === 'item/completed') && p.turnId === current.turnId && p.item) current.items.set(p.item.id, p.item);
         if (notification.method === 'item/completed' && p.turnId === current.turnId && p.item?.type === 'agentMessage') current.messages.set(p.item.id, p.item);
@@ -132,14 +150,15 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       }
       const session = state.session(key);
       const saved = session.codex;
-      const instructions = routingInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('codex') + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '')
+      const instructions = routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('codex') + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '')
         + (web && config.fetch ? fetchInstructions(config.fetch.allow.map(p => p.text)) : '');
       const instructionsHash = createHash('sha256').update(instructions).digest('hex');
       const options = {
         cwd: config.workspace, sandbox: config.sandbox, approvalPolicy: interact ? config.codexApprovalPolicy : 'never', approvalsReviewer: 'user', modelProvider: 'openai', model: config.codexModel,
         serviceTier: config.codexServiceTier,
-        // Configure new threads; resumed histories also need an explicit update below.
-        developerInstructions: instructions,
+        // New threads need their initial developer message. Resumed threads already
+        // contain it; changed instructions are persisted explicitly below.
+        ...(!saved && { developerInstructions: instructions }),
         config: { forced_login_method: 'chatgpt', model_provider: 'openai', 'sandbox_workspace_write.network_access': false, web_search: 'disabled',
           [`mcp_servers.${PUBLISH_SERVER}`]: publication ? { url: publication.url, http_headers: publication.headers,
             required: true, enabled: true, tool_timeout_sec: Math.ceil(config.timeoutMs / 1000), enabled_tools: ['prepare_publish'],
@@ -171,6 +190,14 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       if (saved && thread.thread.id !== saved) throw new PublicError('Codex resumed a different session. The saved history was not replaced.');
       current.threadId = thread.thread.id;
       state.update(key, { codex: current.threadId, codexReport: engineReport(thread) });
+      checkpoint = contextCheckpoints(state, key, 'codex', config.workspace, current.threadId);
+      checkpointSender = checkpointDelivery(checkpoint, async text => {
+        if (current.ended || signal.aborted || !current.turnId) return false;
+        const result = await server.request<{ turnId: string }>('turn/steer', {
+          threadId: current.threadId, expectedTurnId: current.turnId, input: input(text, []),
+        });
+        return result.turnId === current.turnId;
+      });
       signal.throwIfAborted();
       // Resume options do not replace developer messages already in model-visible history.
       // Persist a new message only when the connector instructions have changed.
@@ -182,11 +209,13 @@ export function createCodexBackend(configuration: Config | (() => Config), state
         });
         signal.throwIfAborted();
       }
+      const initialCheckpoint = checkpoint.notice();
       const started = await server.request<{ turn: Turn }>('turn/start', {
-        threadId: current.threadId, input: input(prompt, attachments),
+        threadId: current.threadId, input: input(prompt + (initialCheckpoint ? '\n\n' + initialCheckpoint.text : ''), attachments),
         // Explicit settings also override values persisted in resumed threads.
         model: config.codexModel, effort: config.codexReasoningEffort, serviceTier: config.codexServiceTier,
       });
+      if (initialCheckpoint) checkpoint.delivered(initialCheckpoint.id);
       state.update(key, { codexInstructionsHash: instructionsHash });
       current.turnId = started.turn.id;
       if (started.turn.status !== 'inProgress') { current.ended = true; current.done.resolve(started.turn); }
@@ -194,7 +223,16 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       const completed = await current.done.promise;
       await progress;
       signal.throwIfAborted();
-      if (completed.status !== 'completed') throw new PublicError(completed.status === 'interrupted' ? 'Codex task was interrupted.' : 'Codex task failed. Please retry.');
+      if (completed.status !== 'completed') {
+        // Classify only structured, known codes. Server messages/details may contain sensitive data.
+        const message = completed.status === 'interrupted' ? 'Codex task was interrupted.'
+          : completed.status === 'failed' && completed.error?.codexErrorInfo === 'cyberPolicy'
+            ? 'Codex stopped this task because its safety filter flagged a possible cybersecurity risk (cyberPolicy).'
+            : 'Codex task failed.';
+        const details = [completed.error?.message, completed.error?.additionalDetails]
+          .filter((value): value is string => typeof value === 'string').join('\n\n');
+        throw new OwnerDiagnosticError(message, details);
+      }
       for (const item of completed.items || []) if (item.type === 'agentMessage') current.messages.set(item.id, item);
       const messages = [...current.messages.values()].filter(item => item.phase !== 'commentary');
       const reply = parseMediaReply(messages.at(-1)?.text || '', outbox);
@@ -211,6 +249,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       current.ready.resolve();
       await Promise.allSettled([...current.steering]);
       await current.server?.close();
+      await checkpointSender?.settled();
       signal.removeEventListener('abort', abort);
       if (tasks.get(key) === current) tasks.delete(key);
     }

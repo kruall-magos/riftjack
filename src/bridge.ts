@@ -40,11 +40,13 @@ type Options = {
   steer?: Steer;
   queuedUpdateMessage?: string;
   owner?: string;
+  ownerDiagnostic?: (error: unknown, context: { room: string; sender: string }) => Promise<void>;
   isStopping?: () => boolean;
   restart?: (reply: (text: string) => Promise<void>, target: RestartTarget, scope: RestartScope) => Promise<void>;
   reply: (room: string, event: MatrixEvent, text: string, markdown?: boolean, msgtype?: 'm.text' | 'm.notice', mentions?: string[]) => Promise<void>;
   confirmation?: (room: string, event: MatrixEvent, text: string, controls: ReactionControls, markdown: string) => Promise<void>;
   receive?: (event: MatrixEvent, key: string, signal: AbortSignal, authorize: () => Promise<void>) => Promise<IncomingAttachment>;
+  transcribe?: (file: IncomingAttachment, signal: AbortSignal) => Promise<IncomingAttachment>;
   reactionTarget?: ReactionReader;
   acceptManagerAvatar?: (prompt: string, sender: string) => boolean;
   sendAttachments?: (room: string, event: MatrixEvent, files: OutgoingAttachment[], signal: AbortSignal) => Promise<void>;
@@ -407,6 +409,10 @@ export class Bridge {
       current.markReady();
       while (current.buffered) await current.steering;
       o.report(error);
+      if (current.sender === o.owner && o.isAuthorized(current.sender)) {
+        try { await o.ownerDiagnostic?.(error, { room, sender: current.sender }); }
+        catch (deliveryError) { o.report(deliveryError); }
+      }
       await reply(controller.signal.aborted
         ? `Task ${timedOut ? 'timed out' : 'cancelled'}. Pending follow-ups were discarded. Changes already made are retained.`
         : errorMessage(error) + (current.followups.length ? ' Pending follow-ups were not run; please resend them.' : ''));
@@ -451,8 +457,12 @@ export class Bridge {
     await this.authorize(room, active);
     if (!isMedia(event.content?.msgtype)) return [];
     if (!this.options.receive) throw new PublicError('Attachment reception is not configured.');
-    const file = await this.options.receive(event, active.key, active.controller.signal, () => this.authorize(room, active));
+    let file = await this.options.receive(event, active.key, active.controller.signal, () => this.authorize(room, active));
     await this.authorize(room, active);
+    if (this.options.transcribe) {
+      file = await this.options.transcribe(file, active.controller.signal);
+      await this.authorize(room, active);
+    }
     return [file];
   }
 

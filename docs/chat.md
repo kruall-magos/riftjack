@@ -13,11 +13,11 @@ Agent responses use ordinary Matrix text messages (`m.text`). Connector status, 
 
 Send `!reset` to start a fresh conversation with that bot in the current room/thread, `!cancel` to stop a task, or `!help`. Reset removes the local conversation pointer; it does not erase Matrix history or the engine's session files.
 
-`!help` replies locally with an English command list, without calling a model, and also works during a running task. Codex help includes confirmations, optional IDs and plugin installation; manager help includes bot creation and access-management commands. Claude help describes its queued follow-ups. Owner-only operations are marked. All three help pages use native Matrix formatting: headings, command lists, code-formatted examples and highlighted restrictions, with a readable plain-text fallback. Coding-bot help also uses quoted task examples. The same formatting is used when help accompanies a prompt-length error. No help tables are used.
+`!help` replies locally with an English command list, without calling a model, and also works during a running task. Codex help includes confirmations, optional IDs and plugin installation; manager help includes bot creation and access-management commands. Claude help describes active-task updates and the queued fallback on older CLIs. Owner-only operations are marked. All three help pages use native Matrix formatting: headings, command lists, code-formatted examples and highlighted restrictions, with a readable plain-text fallback. Coding-bot help also uses quoted task examples. The same formatting is used when help accompanies a prompt-length error. No help tables are used.
 
 Text messages beginning with `!` (after trimming whitespace and removing Matrix reply quotes) are reserved for connector commands. Unknown commands and invalid syntax, such as `!aprove` or `!reset extra`, produce a local error and help guidance; they never start a model turn, steer an active task, or enter the follow-up queue. Attachment captions and filenames remain attachment content, not commands.
 
-Coding bots have separate sessions and use their saved workspace, or `RIFTJACK_WORKSPACE` when none was selected. Coding bots run in parallel without a shared lock; each bot still handles one task per conversation. If two bots edit the same file at the same time, one may overwrite the other's changes. Codex runs use `workspace-write` (or `read-only`) and disabled sandbox network/web search. `CODEX_APPROVAL_POLICY` defaults to `on-request`: Codex may request an exception, which is sent to Matrix for explicit approval. Set it to `never` to deny command/file/permission escalations instead. Approvals are routed to the user, not an automatic reviewer. Existing Codex configuration, managed restrictions, MCP tools, and local filesystem readability still apply; use a dedicated OS account/container if stronger isolation is needed. Connector tokens are excluded from both engines' subprocess environments.
+Coding bots have separate sessions and use their saved workspace, or `RIFTJACK_WORKSPACE` when none was selected. Coding bots run in parallel without a shared lock; each bot handles only one active task at a time, across all its conversations. If two bots edit the same file at the same time, one may overwrite the other's changes. Codex runs use `workspace-write` (or `read-only`) and disabled sandbox network/web search. `CODEX_APPROVAL_POLICY` defaults to `on-request`: Codex may request an exception, which is sent to Matrix for explicit approval. Set it to `never` to deny command/file/permission escalations instead. Approvals are routed to the user, not an automatic reviewer. Existing Codex configuration, managed restrictions, MCP tools, and local filesystem readability still apply; use a dedicated OS account/container if stronger isolation is needed. Connector tokens are excluded from both engines' subprocess environments.
 
 ## Background task notifications
 
@@ -71,6 +71,22 @@ delivers an agent reminder after its current task. A timer delivered more than a
 minute late, for example after the connector was stopped, says when it was due and
 how late it is. A crash during delivery is never replayed.
 
+For a recurring reminder, use `schedule` instead of `at` or `delay_minutes`:
+
+```json
+{"action":"remind","label":"Daily check","message":"Check for useful project updates.","deliver":"agent","schedule":{"frequency":"daily","time":"09:00","timezone":"Europe/London"}}
+```
+
+Weekly schedules also require `weekday` (Monday=1 through Sunday=7).
+Recurrence uses the named timezone's local clock, including daylight saving
+changes. A nonexistent local time is skipped; a repeated local time fires only
+at its first occurrence. After downtime, one overdue reminder is delivered and
+the next occurrence is scheduled in the future. The connector persists that next
+occurrence before admitting delivery, so a failed or interrupted run does not
+break the schedule or replay that run. `list` shows the stable schedule ID, next
+due time and last delivery state; `cancel` stops future occurrences. Resetting
+the conversation or revoking access cancels the schedule.
+
 Have the background process write a terminal state on both success and failure.
 Prefer writing a temporary file and renaming it over the status file. The selected
 field must be a top-level string; the JSON file must be a regular file of at most
@@ -113,13 +129,13 @@ Only reactions from an authorized conversation partner to that bot's text messag
 
 ## Messages during work
 
-Claude queues messages from the active conversation as follow-ups; they run after the current step completes. They do not interrupt an in-flight call. See [Claude Code](claude.md#files-and-follow-up-messages).
+Claude steers updates from the active conversation into the running task when its CLI supports `--replay-user-messages`. Delivery is confirmed by the CLI echo; an in-flight tool call is not interrupted. Without replay support, messages run as queued follow-ups. An unconfirmed update is not resent automatically. See [Claude Code](claude.md#files-and-follow-up-messages).
 
 **Codex steering:** while a Codex bot is working, send another message in the same room/thread from the same Matrix account. The connector delivers it to the active task with Codex App Server's `turn/steer`; it does not cancel or restart the task. Text, images, files, and audio attachments can all accompany an update. You receive an acknowledgement after Codex accepts it. During startup, updates wait until the active turn is ready. If the task has already finished, the message runs as the next turn in the same conversation. At most 10 updates/follow-ups can await delivery at once; each text/caption is limited to 16,000 characters. Delivery is serialized, and duplicate Matrix events are ignored.
 
-Messages from a different account, room, thread, or bot cannot steer the current task. Independent conversations can run in parallel. `!reset` requires an idle bot; `!cancel` stops the current task and discards pending follow-ups. The task timeout covers steering and any immediate follow-ups; sending updates does not reset it. Pending updates live in memory and are not replayed after a crash/restart. If steering delivery fails with an uncertain outcome, the connector reports it rather than automatically repeating the request.
+Messages from a different account, room, thread, or bot cannot steer the current task. Different bots can run in parallel, but each bot has only one active task. An ordinary bot refuses another conversation while busy; a linked agent queues other-room messages for separate turns. `!reset` requires an idle bot; `!cancel` stops the current task and discards pending follow-ups. The task timeout covers steering and any immediate follow-ups; sending updates does not reset it. Same-conversation pending updates live in memory and are not replayed after a crash/restart. The [linked-room queue](shared-conversations.md#messages-and-turns) is persisted separately. If steering delivery fails with an uncertain outcome, the connector reports it rather than automatically repeating the request.
 
-The connector uses the Codex App Server JSONL protocol over private stdio pipes, including `thread/start`, `thread/resume`, `turn/start`, `turn/steer`, and `turn/interrupt`. Existing Codex conversation IDs remain usable. No inbound server port is opened. The App Server account must report ChatGPT authentication before a turn can start.
+The connector uses the Codex App Server JSONL protocol over private stdio pipes, including `thread/start`, `thread/resume`, `turn/start`, `turn/steer`, and `turn/interrupt`. Existing Codex conversation IDs remain usable. This stdio transport opens no server port; connector MCP tools separately use authenticated loopback HTTP listeners during a task. The App Server account must report ChatGPT authentication before a turn can start.
 
 ## Confirmations and answers
 
@@ -134,7 +150,7 @@ For Codex, the bot forwards command approvals, file-change approvals (with the a
 
 If several requests are pending, specify the ID from the message. Explicit IDs also work for a single request. An unknown or expired explicit ID never selects a different request. For `!answer`, a leading 12-character hexadecimal token is interpreted as an ID; if your answer starts with such a token, include the current request ID before the answer.
 
-In Element X, you can also tap the bot's ✅ (approve) or ❌ (decline) reaction under the last message of a confirmation. If the bot cannot add the reactions, add the same emoji manually or use a command. Reactions select that exact request even with several pending requests; only the original authorized sender in the same encrypted DM can answer. The message binding preserves thread scope. The first valid command or reaction wins; removing a reaction does not undo a decision. Expired requests and replayed reactions do nothing. Forms and questions still require `!answer`; they show only ❌. This applies to confirmations from coding bots and the manager.
+In Element X, you can also tap the bot's ✅ (approve) or ❌ (decline) reaction under the last message of a confirmation. If the bot cannot add the reactions, add the same emoji manually or use a command. Reactions select that exact request even with several pending requests; only the original authorized sender in the same encrypted room can answer, including a configured shared room. The message binding preserves thread scope. The first valid command or reaction wins; removing a reaction does not undo a decision. Expired requests and replayed reactions do nothing. Forms and questions still require `!answer`; they show only ❌. This applies to confirmations from coding bots and the manager.
 
 Confirmation text is encrypted. The emoji and target event ID are sent as standard unencrypted Matrix annotations, without the request text or answer contents. Reactions bind only after all parts of a request have been sent successfully.
 
@@ -145,7 +161,7 @@ Confirmation text is encrypted. The emoji and target event ID are sent as standa
 !answer 012345abcdef {"confirm":true}
 ```
 
-`!approve` accepts only the displayed request; it never creates a permanent allow rule or accepts a whole session. For permission requests, the displayed additional permissions last for the current turn. Questions require `!answer`; a single question takes plain text, several questions take a JSON object keyed by question ID. MCP forms take a JSON object with the requested fields and do not submit defaults automatically. The bot lists the valid commands and answer format for each request. Ordinary messages in any language are task updates, not confirmation answers. During a Codex task they are forwarded to the active agent even while a confirmation is pending. Claude queues them for the next turn. Neither path treats the text as an answer to the request. Use an explicit command or the displayed reaction to answer it.
+`!approve` accepts only the displayed request; it never creates a permanent allow rule or accepts a whole session. For permission requests, the displayed additional permissions last for the current turn. Questions require `!answer`; a single question takes plain text, several questions take a JSON object keyed by question ID. MCP forms take a JSON object with the requested fields and do not submit defaults automatically. The bot lists the valid commands and answer format for each request. Ordinary messages in any language are task updates, not confirmation answers. During a Codex task they are forwarded to the active agent even while a confirmation is pending. Claude uses the steering or queued follow-up behavior described above. Neither path treats the text as an answer to the request. Use an explicit command or the displayed reaction to answer it.
 
 For the initial owner, a Codex command request may also offer **🔖 Approve and remember** when the agent explicitly chooses an exact persistent command prefix and App Server proposes the same argument list. The request shows the exact prefix as an argument list, separately from the command and working directory. Tap 🔖 on that confirmation, or use `!answer ID remember` (or `!answer remember` for a single pending request), to approve this command and ask Codex to save exactly that rule. The bookmark reaction selects that exact fully delivered request even when several are pending, and is ignored on requests without this option. Ordinary `!approve` and ✅ remain one-time approvals; ❌ declines without saving. An answer cannot edit or broaden the proposed prefix. This option is not offered for guests, missing or invalid proposals, unsupported decisions, stdin requests, or managed-network approvals.
 
@@ -177,11 +193,11 @@ Coding bots render Markdown replies as sanitized Matrix HTML (`format: org.matri
 
 ## Bot status
 
-Send `!status` to a Codex or Claude Code bot to see its task state and configured workspace/model, including per-bot overrides. Change those through the manager’s [model settings commands](manager.md#model-settings). Codex also shows configured reasoning effort and service tier. The command works during a task, does not steer or queue a prompt, and does not start a CLI process or make a model request. It is available to accounts authorized to use the bot in a private conversation.
+Send `!status` to a Codex or Claude Code bot to see its task state and configured workspace/model, including per-bot overrides. Change those through the manager’s [model settings commands](manager.md#model-settings). Codex also shows configured reasoning effort and service tier. The command works during a task, does not steer or queue a prompt, and does not start a CLI process or make a model request. It is available to accounts authorized to use the bot in a private conversation or configured shared room.
 
 The separate **Last CLI session report** section shows metadata reported when Codex starts/resumes a thread or Claude Code emits its session initialization event, with the report timestamp. Codex reports its model, reasoning effort, service tier and workspace. Claude reports its model, workspace, permission mode and Fast mode when available. Claude's ordinary stream output may omit effort; missing fields are shown as unknown. These are session reports, not per-request inference receipts or live queries. Changed settings, model fallback or changes made outside Riftjack may differ from the last report.
 
-Reports are scoped to the bot, sender, room and Matrix thread, survive connector restarts, and are cleared by `!reset`. A new conversation has no report until its CLI starts a task. No other conversation's report or task details are shown. Grok's `!status` shows queue/lease/delivery counts; its model settings and workspace are controlled by the external worker and are not reported to Riftjack.
+For ordinary bots, reports are scoped to the bot, sender, room and Matrix thread, survive connector restarts, and are cleared by `!reset`. A new conversation has no report until its CLI starts a task. Linked rooms share the linked session report; `!reset` is disabled for linked agents. Grok's `!status` shows queue/lease/delivery counts; its model settings and workspace are controlled by the external worker and are not reported to Riftjack.
 
 ## Reviewed publication
 
@@ -213,6 +229,25 @@ node --import tsx scripts/prepare-publish.mts --workspace /path/to/workspace \
 
 It returns JSON identifying the report, commits and SHA-256, never pushes, and refuses to overwrite an existing output file. It reads the remote and may fetch its base commit into the local object store without changing working files or branches. The TypeScript API is `preparePublish`; the Matrix handler adds delivery, explicit confirmation and publication. External-worker publication endpoints are not implemented. Ordinary shell `git push` approvals do not gain an HTML review automatically. Git hooks and host Git configuration remain trusted host code; this workflow is not an OS security boundary against other processes running under the same account.
 
+## Reading web resources
+
+When the owner has [configured fetch](setup.md#optional-fetch-tool), ask the bot
+to inspect a CI log or API response under an allowed URL prefix. The connector's
+`fetch` tool supports only GET and HEAD, with no request body or caller-supplied
+headers. Calls to this tool must be sequential; a second concurrent call is
+refused while the first is pending.
+
+GET saves a new file in `.fetch/` under that bot's workspace and returns its
+path, final URL, HTTP status, content type, byte count and `truncated` flag.
+The body is not inserted into the conversation: the agent reads or processes
+the file with its usual tools. A saved file can be an HTTP error response; check
+`status` and `truncated` before treating it as a complete successful download.
+HEAD returns metadata with `bytes: 0` and creates no file.
+
+Files remain across turns and restarts until removed. Delete them when no
+longer needed and keep `.fetch/` out of project commits. Bots sharing a workspace
+can read the same files. Downloaded content is external data, not instructions.
+
 ## Account usage
 
 The initial owner can send `!usage` to a Claude bot to see the Claude account's current session and weekly limits and their reset times. It runs Claude Code's local `/usage` command, which makes no model request, and works while a task is running.
@@ -220,7 +255,7 @@ The initial owner can also send `!usage` to a Codex bot, even during a task, to 
 
 ## Images, files, and audio
 
-Coding bots accept encrypted Matrix image, file, and audio attachments, including voice recordings sent as `m.audio`. Attach a file normally in Element, optionally with a caption. PNG, JPEG, GIF, and WebP images are supplied as native image inputs. Documents and audio are saved locally and their paths are supplied to the selected engine. There is no automatic speech transcription or speech synthesis; sending an audio file does not by itself mean the agent can listen to it. The manager accepts text commands and encrypted images with an authorized `set avatar Riftjack Codex` caption; other attachments are rejected.
+Coding bots accept encrypted Matrix image, file, and audio attachments, including voice recordings sent as `m.audio`. Attach a file normally in Element, optionally with a caption. PNG, JPEG, GIF, and WebP images are supplied as native image inputs. Documents and audio are saved locally and their paths are supplied to the selected engine. Optional [local audio transcription](audio-transcription.md) adds transcript metadata and is disabled by default. There is no automatic speech synthesis; without a transcript or audio-processing tools, sending an audio file does not by itself mean the agent can understand it. The manager accepts text commands and encrypted images with an authorized `set avatar Riftjack Codex` caption; other attachments are rejected.
 
 Ask a coding bot naturally to send an image, document, or audio file, for example “Send me the report as a PDF” or “Send the WAV file you created.” Each turn provides the agent with a separate outbox and instructions for explicitly attaching its results. The connector sends pictures as `m.image`, supported audio formats (MP3, WAV, OGG/Opus, M4A, AAC, FLAC, WEBA) as `m.audio`, and other formats as `m.file`. SVG is delivered as a file. Ordinary Markdown links and paths in a response do not upload files.
 

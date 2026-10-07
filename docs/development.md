@@ -12,11 +12,11 @@ npm test
 python3 -m unittest discover -s test -p '*_test.py'
 ```
 
-`npm test` runs the tests in `test/` without opening HTTP listening ports. They use local files, child-process stubs and mocked transports; run them in the normal sandbox without requesting network or port access.
+`npm test` runs the tests in `test/` without opening HTTP listening ports. They use local files, child-process stubs and mocked transports; start them in the normal sandbox without requesting network or port access. The launcher tests also inspect and signal their own temporary processes using `ps` and `lsof`; a sandbox that denies those operations requires a separately approved rerun of `node --test test/connector-launcher.test.mjs`.
 
 `npm run test:http` runs `test/http/*.test.ts`. These tests bind an ephemeral port on `127.0.0.1` and make loopback requests, including from the Python worker client. They use no live Matrix service or model account. A sandbox that blocks listening ports may require permission for this command.
 
-Run the HTTP suite when changing the publication, background-task, attachment or room-message MCP transport or its Codex/Claude integration, the worker HTTP server, API authentication/routing, long polling, request/response or attachment handling, `scripts/worker-client.py`, or queue/service behavior exposed through that API. Also run it when changing its fixtures, suite layout, or relevant dependencies. Changes confined to chat commands, formatting, documentation, or Codex/Claude adapters normally need only the relevant ordinary tests and type checking. Queue and worker-status unit tests remain in `npm test`. Publication logic tests use temporary local bare Git repositories and need no listening port or live GitHub access. MCP integration tests in `test/http/` open loopback ports and use CLI doubles plus local bare repositories; they make no model requests or live GitHub calls.
+Run the HTTP suite when changing the publication, background-task, attachment, room-message or fetch MCP transport or its Codex/Claude integration, the worker HTTP server, API authentication/routing, long polling, request/response or attachment handling, `scripts/worker-client.py`, or queue/service behavior exposed through that API. Also run it when changing its fixtures, suite layout, or relevant dependencies. Changes confined to chat commands, formatting, documentation, or Codex/Claude adapters normally need only the relevant ordinary tests and type checking. Queue and worker-status unit tests remain in `npm test`. Publication logic tests use temporary local bare Git repositories and need no listening port or live GitHub access. MCP integration tests in `test/http/` open loopback ports and use CLI doubles plus local bare repositories; they make no model requests or live GitHub calls.
 
 Use `npm run test:all` when a full validation is intended; it runs both suites and requires permission to open a loopback port in restricted environments. Put future port-opening tests under `test/http/`; keep tests that need no listener in `test/`. Type checking includes both directories. Run `npm audit` separately when checking dependencies; it contacts the package registry.
 
@@ -42,6 +42,8 @@ Review the staged files and scan for credentials. Runtime data and real deployme
 
 Keep the README focused on the first successful conversation. Put command details in chat.md or manager.md, installation details in setup.md, and lifecycle behavior in operations.md. Describe current behavior and known limitations; release-specific migration notes should identify the affected version.
 
+When changing user-visible behavior, check all descriptions of that behavior in the README, relevant guides, built-in help and agent-facing tool instructions in the same change. Verify defaults, limits and exceptions against the implementation; do not copy an older guide as the source of truth.
+
 Built-in messages, help and documentation use English; agent conversations can use any supported language. Use neutral examples such as `projects/demo` and `@alice:example.com`, without personal conversation details or real deployment paths. Unicode names, paths and messages remain valid test inputs. Tests should check behavior and data rather than incidental wording or whitespace, except when the displayed text or layout is the behavior being tested.
 
 
@@ -57,8 +59,8 @@ Each command runs a separate Node process with a loopback HTTP receiver and veri
 ## Routing context
 
 Stable Matrix routing rules live in `routing-instructions.ts`. Codex receives them
-as developer instructions on thread start and resume; the existing instruction
-hash also updates older sessions once. Claude receives them through
+as developer instructions on thread start; resumed histories retain them, and
+the instruction hash adds an update only when they change. Claude receives them through
 `--append-system-prompt` on every process start, including resume. When the CLI
 advertises `--system-prompt-snapshot`, the backend sets it to `off` so an old
 snapshot cannot silently override updated connector instructions. They are not
@@ -83,5 +85,51 @@ Repeated starts/completions are suppressed within a backend call. Only an
 observed completion is reported as successful; a run ending while compaction is
 pending reports that completion was not confirmed. A hard connector crash cannot
 send that final notice. Delivery failures are reported without interrupting the
-agent, and uncertain sends are not retried. These notifications do not yet ask
-the agent to save or reload memory.
+agent, and uncertain sends are not retried.
+
+## Continuity notes
+
+The Codex and Claude adapters send a separate agent reminder when the latest
+reported context usage reaches 65% of a known model window. This is an early
+warning, not a promise that compaction is imminent or can be delayed. A large
+tool response or a CLI-specific threshold can still cause compaction first.
+Codex uses `thread/tokenUsage/updated.last.totalTokens` and `modelContextWindow`,
+not cumulative usage. Claude uses a main-agent assistant message's input tokens,
+including cache reads and creation, and the matching model's `contextWindow`
+reported in `result.modelUsage`. It does not guess capacity from model names.
+Claude's first run may have no known window until the result; a needed reminder
+then accompanies the next ordinary input. Older CLIs without usage/capacity
+fields cannot provide an early warning.
+
+The reminder supplies a session-specific file under
+`<workspace>/.riftjack/checkpoints/`. The agent chooses the content and writes it
+with its own tools, subject to existing sandbox and approval rules. The
+connector never reads or writes note content, grants filesystem access, or
+asserts that a note was actually saved. Read-only agents must respect their
+write restriction. Notes can refer to existing personal memory, but are not
+new instructions or authorization and should stay out of project commits.
+Separate backend/session identifiers give separate paths; resetting a session
+does not adopt the previous session's note. Files remain until the agent or
+human removes them. A shared workspace is not filesystem privacy isolation.
+
+After compaction, the adapter asks the agent to read its note if present,
+check freshness, and resume the existing task. Claude uses a synchronous
+`SessionStart` hook matching `compact`: its `additionalContext` reaches the
+first model request after compaction. The hook only constructs the note path;
+it does not read memory files or grant permissions. Memory references belong
+in the agent's note, not in connector code. The helper is included in code
+snapshots and runs with the same Node executable as the connector.
+
+An observed start/completion pair also records a pending restore reminder.
+On CLIs advertising `--include-hook-events`, Riftjack requests hook events;
+matching output with exit code zero and outcome `success` clears the reminder.
+Without those events delivery remains uncertain and the fallback may repeat it.
+If hooks are disabled or fail,
+Claude falls back to live steering after the next assistant event (which can
+be later than the first continuation), or the next ordinary input. Codex uses
+live steering, without a first-continuation ordering guarantee. Unaccepted or
+uncertain delivery remains pending; there is no autonomous extra model run or
+retry loop. State survives connector restarts. Replayed completion events
+alone do not enqueue another reminder. Unobserved compaction during a
+connector crash cannot enqueue the fallback reminder.
+The existing human-facing private compaction notices are unchanged.

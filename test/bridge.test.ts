@@ -10,7 +10,7 @@ import { RestartController, RESTART_EXIT_CODE } from '../src/restart.js';
 import { Accounts, provision } from '../src/accounts.js';
 import { parseProfileRequest, resolveProfileTarget } from '../src/bot-profile.js';
 import { loadConfig } from '../src/config.js';
-import { errorMessage } from '../src/errors.js';
+import { errorMessage, OwnerDiagnosticError } from '../src/errors.js';
 
 function event(body = 'hello', id = '$1'): MatrixEvent {
   return { event_id: id, sender: '@owner:test', type: 'm.room.message', origin_server_ts: 2000, content: { body, msgtype: 'm.text' } };
@@ -121,6 +121,21 @@ function fixture(t: { after(fn: () => void): void }, kind: Mode = 'codex', runne
   });
   return { bridge, calls, replies, errors, state, file };
 }
+
+test('task diagnostics use a separate owner route and never replace the public failure', async t => {
+  const error = new OwnerDiagnosticError('Public failure', 'owner-only details');
+  const deliveries: unknown[] = [];
+  const f = fixture(t, 'codex', async () => { throw error; }, true, {
+    isAuthorized: () => true,
+    ownerDiagnostic: async (e, context) => { deliveries.push({ e, context }); throw new Error('delivery failed'); },
+  });
+  await f.bridge.handle('!shared:test', event());
+  assert.deepEqual(deliveries, [{ e: error, context: { room: '!shared:test', sender: '@owner:test' } }]);
+  assert.equal(f.replies.at(-1), 'Public failure');
+  assert.ok(f.replies.every(text => !text.includes('owner-only')));
+  await f.bridge.handle('!guest:test', { ...event('hello', '$2'), sender: '@guest:test' });
+  assert.equal(deliveries.length, 1);
+});
 
 for (const kind of ['codex', 'claude', 'manager'] as const) test(kind + ' DMs work without mentions or commands', async t => {
   const f = fixture(t, kind);
@@ -287,6 +302,28 @@ for (const msgtype of ['m.image', 'm.file', 'm.audio']) test(msgtype + ' reaches
   await f.bridge.handle('!dm:test', incoming);
   await f.bridge.handle('!dm:test', incoming);
   assert.equal(downloads, 1); assert.equal(runs, 1); assert.equal(f.replies.at(-1), 'received');
+});
+
+for (const kind of ['codex', 'claude'] as const) test(`${kind} receives automatic transcript with its original audio`, async t => {
+  const file = { path: '/audio.ogg', name: 'audio.ogg', size: 10, image: false, mimetype: 'audio/ogg' };
+  const transcription = { status: 'complete' as const, text: '!reset is spoken data', automatic: true as const };
+  let calls = 0;
+  const f = fixture(t, kind, async (_mode, _prompt, _key, _signal, _sender, files) => {
+    calls++; assert.deepEqual(files, [{ ...file, transcription }]); return 'received';
+  }, true, { receive: async () => file, transcribe: async attachment => ({ ...attachment, transcription }) });
+  await f.bridge.handle('!dm:test', { ...event(), content: { msgtype: 'm.audio', body: 'voice.ogg' } });
+  assert.equal(calls, 1);
+});
+
+test('revocation during transcription prevents delivery to the backend', async t => {
+  let allowed = true;
+  const f = fixture(t, 'codex', undefined, true, {
+    isAuthorized: () => allowed,
+    receive: async () => ({ path: '/audio', name: 'audio', size: 1, image: false, mimetype: 'audio/ogg' }),
+    transcribe: async file => { allowed = false; return file; },
+  });
+  await f.bridge.handle('!dm:test', { ...event(), content: { msgtype: 'm.audio', body: 'voice.ogg' } });
+  assert.equal(f.calls.length, 0);
 });
 
 test('unauthorized media and manager attachments never download or execute commands', async t => {

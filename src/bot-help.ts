@@ -12,11 +12,11 @@ export function botHelp(kind: 'codex' | 'claude' | 'grok'): string {
     '### Updates during work',
     kind === 'codex'
       ? 'Send another message **in the same chat or thread** to update the active task (steering).'
-      : 'Send another message **in the same chat or thread** to queue it after the current step.',
+      : 'Send another message **in the same chat or thread** to update the running task when Claude supports message replay; otherwise it is queued as a follow-up. An in-flight tool call is not interrupted.',
     '> Also check empty input.',
     'By default, each thread has separate history and another conversation must wait until the bot is idle. With configured session links, rooms share one existing history: other-room messages queue for separate turns and never steer this task. Linked agents do not support `!reset`.',
     '### Attachments',
-    '- Send images, files or audio; explain what to do with them in a caption or message.\n- Audio is **not transcribed automatically**.\n- To receive a file, ask for an **attachment**: a local path link does not send a file to the chat.',
+    '- Send images, files or audio; explain what to do with them in a caption or message.\n- Automatic audio transcription is optional and disabled by default.\n- To receive a file, ask for an **attachment**: a local path link does not send a file to the chat.',
     '### Confirmations and answers',
     '- `!approve` or ✅ — approve an action.\n- `!deny` or ❌ — decline.\n- `!answer blue` — answer a question; replace “blue” with your answer.',
     'Reply in the same chat or thread. If several requests are pending, include the ID from the message: `!approve ID` or `!answer ID your answer`. Replace `ID` with the identifier, without brackets.',

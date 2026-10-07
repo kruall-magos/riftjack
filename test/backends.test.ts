@@ -12,6 +12,7 @@ import { Bridge, type MatrixEvent } from '../src/bridge.js';
 import { configForWorkspace } from '../src/workspace.js';
 import { codexUsage } from '../src/codex-usage.js';
 import { approvalInstructions } from '../src/approval-instructions.js';
+import { OwnerDiagnosticError } from '../src/errors.js';
 
 function setup(t: { after(fn: () => void): void }, accountType = 'chatgpt') {
   const dir = mkdtempSync(join(tmpdir(), 'matrix-app-server-'));
@@ -30,10 +31,12 @@ const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
 const respond = (id, result) => send({ id, result });
 const threadId = 'thread_1', turnId = 'turn_1';
 let prompt = '', instructions = '', updates = [];
+const turnError = () => fs.existsSync(path.join(__dirname, 'turn-error.json'))
+  ? JSON.parse(fs.readFileSync(path.join(__dirname, 'turn-error.json'), 'utf8')) : null;
 const complete = (text, status = 'completed') => {
   send({ method: 'item/completed', params: { threadId, turnId, item: { id: 'comment', type: 'agentMessage', text: 'Checking the project.', phase: 'commentary' } } });
   send({ method: 'item/completed', params: { threadId, turnId, item: { id: 'answer', type: 'agentMessage', text, phase: 'final_answer' } } });
-  send({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status, items: [] } } });
+  send({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status, items: [], error: turnError() } } });
 };
 readline.createInterface({ input: process.stdin }).on('line', line => {
   const message = JSON.parse(line); log(message);
@@ -59,7 +62,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         return send({ id, error: { code: -32600, message: 'failed to load configuration: invalid transport' } });
       }
     }
-    instructions = p.developerInstructions;
+    if (p.developerInstructions !== undefined) instructions = p.developerInstructions;
     return respond(id, { thread: { id: threadId }, model: 'resolved-model', reasoningEffort: 'medium', serviceTier: 'default', cwd: process.cwd() });
   }
   if (method === 'thread/inject_items') {
@@ -69,6 +72,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   }
   if (method === 'turn/start') {
     prompt = p.input[0].text;
+    if (prompt.includes('[immediate-fail]')) return respond(id, { turn: { id: turnId, status: 'failed', error: turnError() } });
     send({ method: 'turn/started', params: { threadId, turn: { id: turnId, status: 'inProgress', items: [] } } });
     const begin = () => {
       respond(id, { turn: { id: turnId, status: 'inProgress', items: [] } });
@@ -255,6 +259,9 @@ test('connector instructions are Codex developer instructions, not part of the u
   assert.ok(f.calls().find(c => c.method === 'thread/start').params.developerInstructions.includes(approvalInstructions('codex')));
   assert.ok(f.calls().find(c => c.method === 'thread/start').params.developerInstructions.includes(routingInstructions));
   assert.equal(f.calls().find(c => c.method === 'turn/start').params.input[0].text, 'hello');
+  await f.backend('codex', 'continue', 'key', signal(), '@owner:test');
+  assert.equal(f.calls().find(c => c.method === 'thread/resume').params.developerInstructions, undefined);
+  assert.equal(f.calls().filter(c => c.method === 'thread/inject_items').length, 0);
 });
 
 test('existing Codex sessions receive approval judgment instructions once before the next model turn', async t => {
@@ -271,7 +278,7 @@ test('existing Codex sessions receive approval judgment instructions once before
   await f.backend('codex', 'again', 'key', signal(), '@owner:test');
   assert.equal(f.calls().filter(c => c.method === 'thread/inject_items').length, 1);
   for (const call of f.calls().filter(c => c.method === 'thread/resume')) {
-    assert.ok(call.params.developerInstructions.includes(routingInstructions));
+    assert.equal(call.params.developerInstructions, undefined);
   }
 });
 
@@ -284,7 +291,7 @@ test('resuming a Codex conversation explicitly refreshes the attachment limit', 
   const start = f.calls().find(c => c.method === 'thread/start').params;
   const resume = f.calls().find(c => c.method === 'thread/resume').params;
   assert.match(start.developerInstructions, /20971520 bytes each/);
-  assert.match(resume.developerInstructions, /536870912 bytes each/);
+  assert.equal(resume.developerInstructions, undefined);
   assert.equal(resume.threadId, 'thread_1');
   assert.equal(resume.config.developer_instructions, undefined);
   const calls = f.calls();
@@ -363,6 +370,41 @@ test('App Server preserves ChatGPT-only authentication, sandbox settings and con
   assert.equal(await f.backend('codex', 'retry', 'conversation', signal(), '@owner:test'), 'done');
 });
 
+test('Codex reports structured cyber policy failures without exposing diagnostics or retrying', async t => {
+  for (const prompt of ['[fail]', '[immediate-fail]']) {
+    const f = setup(t);
+    writeFileSync(join(f.dir, 'turn-error.json'), JSON.stringify({
+      codexErrorInfo: 'cyberPolicy', message: 'private diagnostic', additionalDetails: 'private details',
+    }));
+    await assert.rejects(f.backend('codex', prompt, 'conversation', signal(), '@owner:test'), error => {
+      assert.match(String(error), /safety filter.*possible cybersecurity risk.*cyberPolicy/);
+      assert.doesNotMatch(String(error), /private|retry/i);
+      assert.ok(error instanceof OwnerDiagnosticError);
+      assert.equal(error.ownerDetails(), 'private diagnostic\n\nprivate details');
+      return true;
+    });
+    assert.equal(f.calls().filter(c => c.method === 'turn/start').length, 1);
+    assert.equal(f.state.session('conversation').codex, 'thread_1');
+  }
+});
+
+test('Codex does not infer a policy category from free text or unknown error values', async t => {
+  for (const codexErrorInfo of [null, 'futureCategory-private', { cyberPolicy: 'private' }]) {
+    const f = setup(t);
+    writeFileSync(join(f.dir, 'turn-error.json'), JSON.stringify({
+      codexErrorInfo, message: 'cyberPolicy private diagnostic', additionalDetails: 'private details',
+    }));
+    await assert.rejects(f.backend('codex', '[fail]', 'conversation', signal(), '@owner:test'),
+      { message: 'Codex task failed.' });
+  }
+});
+
+test('Codex success is not overridden by a policy field on the turn', async t => {
+  const f = setup(t);
+  writeFileSync(join(f.dir, 'turn-error.json'), JSON.stringify({ codexErrorInfo: 'cyberPolicy' }));
+  assert.equal(await f.backend('codex', 'hello', 'conversation', signal(), '@owner:test'), 'done');
+});
+
 test('API-key accounts cannot start a model turn', async t => {
   const f = setup(t, 'apiKey');
   await assert.rejects(f.backend('codex', 'hello', 'key', signal(), '@owner:test'), /ChatGPT account/);
@@ -373,13 +415,15 @@ test('native images and local audio/file metadata survive the App Server transpo
   const f = setup(t);
   const attachments = [
     { path: join(f.dir, 'image.png'), name: 'image.png', image: true, mimetype: 'image/png', size: 10 },
-    { path: join(f.dir, 'audio.ogg'), name: 'audio.ogg', image: false, mimetype: 'audio/ogg', size: 10 },
+    { path: join(f.dir, 'audio.ogg'), name: 'audio.ogg', image: false, mimetype: 'audio/ogg', size: 10,
+      transcription: { status: 'complete' as const, text: 'Example spoken request.', automatic: true as const } },
     { path: join(f.dir, 'notes.txt'), name: 'notes.txt', image: false, mimetype: 'text/plain', size: 10 },
   ];
   const reply = await f.backend('codex', '[attachment]', 'key', signal(), '@owner:test', attachments) as BackendReply;
   const input = f.calls().find(c => c.method === 'turn/start').params.input;
   assert.deepEqual(input[1], { type: 'localImage', path: attachments[0].path });
   assert.equal(input.length, 2); assert.ok(input[0].text.includes(attachments[1].path)); assert.ok(input[0].text.includes(attachments[2].path));
+  assert.ok(input[0].text.includes(JSON.stringify(attachments[1].transcription)));
   assert.equal(reply.text, 'Here is the file.'); assert.equal(readFileSync(reply.attachments[0].path, 'utf8'), 'file contents');
 });
 

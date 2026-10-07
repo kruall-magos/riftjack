@@ -1,5 +1,7 @@
 import { routingInstructions } from './routing-instructions.js';
+import { claudeAuthenticationFailure } from './auth-diagnostics.js';
 import { compactionNotices } from './compaction-notices.js';
+import { contextCheckpoints, checkpointDelivery, checkpointInstructions, claudeCheckpointHooks } from './context-checkpoints.js';
 import { startBackgroundMcp, BACKGROUND_SERVER, BACKGROUND_TOOL, backgroundInstructions } from './background-mcp.js';
 import { attachmentDelivery } from './attachment-delivery.js';
 import { startAttachmentMcp, ATTACHMENT_SERVER, ATTACHMENT_TOOL } from './attachment-mcp.js';
@@ -111,7 +113,7 @@ async function capture(config: Config, args: string[], signal: AbortSignal): Pro
 
 // Returns whether the CLI can acknowledge user messages written during a turn
 // (--replay-user-messages), which live steering requires.
-export async function checkClaude(config: Config, signal = AbortSignal.timeout(15_000)): Promise<{ replay: boolean; systemPromptSnapshot: boolean }> {
+export async function checkClaude(config: Config, signal = AbortSignal.timeout(15_000)): Promise<{ replay: boolean; systemPromptSnapshot: boolean; hookEvents: boolean }> {
   const checkSignal = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
   const help = await capture(config, ['--help'], checkSignal);
   for (const flag of ['--input-format', '--output-format', '--permission-mode', '--permission-prompt-tool', '--append-system-prompt', '--tools', '--settings', '--resume']) {
@@ -126,7 +128,7 @@ export async function checkClaude(config: Config, signal = AbortSignal.timeout(1
   if (status?.loggedIn !== true || status.authMethod !== 'claude.ai') {
     throw new PublicError('Sign in to Claude Code with your Claude account on the host (claude auth login). This connector does not use Anthropic API keys.');
   }
-  return { replay: help.includes('--replay-user-messages'), systemPromptSnapshot: help.includes('--system-prompt-snapshot') };
+  return { replay: help.includes('--replay-user-messages'), systemPromptSnapshot: help.includes('--system-prompt-snapshot'), hookEvents: help.includes('--include-hook-events') };
 }
 
 // Read-only bots never ask: an approval could otherwise grant writes.
@@ -153,10 +155,11 @@ export function claudeApprovals(config: Config): boolean {
 }
 
 export function claudeArguments(config: Config, session?: string, interactive = false, instructions?: string, publication?: PublishConnection, background?: PublishConnection, media?: PublishConnection, rooms?: PublishConnection,
-  replay = false, systemPromptSnapshot = false, web?: PublishConnection): string[] {
+  replay = false, systemPromptSnapshot = false, web?: PublishConnection, hookEvents = false): string[] {
   const readOnly = config.sandbox === 'read-only';
   const tools = readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash';
   const settings = {
+    hooks: claudeCheckpointHooks(config.workspace),
     // Sandboxed Bash skips this blanket ask rule in auto-allow mode. Outside the
     // sandbox it takes precedence over saved allow rules, including exclusions.
     permissions: { ask: ['Bash'] },
@@ -187,6 +190,7 @@ export function claudeArguments(config: Config, session?: string, interactive = 
   if (session) args.push('--resume', session);
   // Echoes user messages from stdin with their UUID once Claude consumes them.
   if (replay) args.push('--replay-user-messages');
+  if (hookEvents) args.push('--include-hook-events');
   return args;
 }
 
@@ -210,7 +214,7 @@ async function claudeMessage(prompt: string, attachments: IncomingAttachment[], 
 export function createClaudeBackend(configuration: Config | (() => Config), state: State): Backend & { steer: Steer } {
   // Each check spawns two Claude processes. Re-check only at first use and after a failed task,
   // so a logout or downgrade still gets an actionable message on the next attempt.
-  let checked = false, replay = false, systemPromptSnapshot = false;
+  let checked = false, replay = false, systemPromptSnapshot = false, hookEvents = false;
   // Live steering into the running turn of each conversation key.
   const live = new Map<string, (prompt: string, attachments: IncomingAttachment[], signal: AbortSignal) => Promise<boolean>>();
   const run: Backend = async (...args) => {
@@ -220,9 +224,13 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
     const config = { ...(typeof configuration === 'function' ? configuration() : configuration) };
     if (mode !== 'claude') throw new Error('Claude backend received the wrong bot kind.');
     signal.throwIfAborted();
-    if (!checked) { ({ replay, systemPromptSnapshot } = await checkClaude(config, signal)); checked = true; }
+    if (!checked) { ({ replay, systemPromptSnapshot, hookEvents } = await checkClaude(config, signal)); checked = true; }
     const outbox = await outboxDirectory(config.workspace, 'claude:' + key);
-    const input = await claudeInput(prompt, attachments, config);
+    const savedSession = state.session(key).claude;
+    let checkpoint = savedSession ? contextCheckpoints(state, key, 'claude', config.workspace, savedSession) : undefined;
+    let checkpointSender: ReturnType<typeof checkpointDelivery> | undefined;
+    const initialCheckpoint = checkpoint?.notice();
+    const input = await claudeInput(prompt + (initialCheckpoint ? '\n\n' + initialCheckpoint.text : ''), attachments, config);
     // An update is confirmed only when Claude echoes its UUID. Without the echo,
     // delivery is uncertain: it is never resent automatically.
     const updates = new Map<string, { resolve: (accepted: boolean) => void; reject: (error: unknown) => void }>();
@@ -241,6 +249,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       stdinRef.write({ type: 'user', uuid, message });
       return acknowledged;
     };
+    if (checkpoint) checkpointSender = checkpointDelivery(checkpoint, text => steerHere(text, [], signal));
     live.set(key, steerHere);
     let assistantText = '';
     let lastAssistantWasSynthetic = false;
@@ -257,7 +266,6 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       pendingProgress = '';
     };
     let sessionId: string | undefined;
-    const savedSession = state.session(key).claude;
     const interactive = !!interact && claudeApprovals(config);
     // Open confirmations by Claude request ID; aborted when Claude withdraws them or the turn ends.
     const pending = new Map<string, AbortController>();
@@ -291,8 +299,8 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
         media = await startAttachmentMcp(delivery.action, AbortSignal.any([signal, mediaLifetime.signal]));
       }
       await runClaude(config, claudeArguments(config, savedSession, interactive,
-        routingInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('claude') + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '')
-          + (web && config.fetch ? fetchInstructions(config.fetch.allow.map(p => p.text)) : ''), publication, background, media, rooms, replay, systemPromptSnapshot, web), signal, (line, stdin) => {
+        routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('claude') + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '')
+          + (web && config.fetch ? fetchInstructions(config.fetch.allow.map(p => p.text)) : ''), publication, background, media, rooms, replay, systemPromptSnapshot, web, hookEvents), signal, (line, stdin) => {
       let message: any;
       try { message = JSON.parse(line); } catch { throw new PublicError('Claude Code returned invalid stream-json output. Check its installed version.'); }
       if (typeof message.session_id === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(message.session_id)) {
@@ -300,6 +308,10 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
         if (sessionId !== message.session_id) {
           sessionId = message.session_id;
           state.update(key, { claude: sessionId });
+          if (!checkpoint) {
+            checkpoint = contextCheckpoints(state, key, 'claude', config.workspace, message.session_id);
+            checkpointSender = checkpointDelivery(checkpoint, text => steerHere(text, [], signal));
+          }
         }
       }
       // Only the replayed copy of an update we wrote confirms it; tool results are also user messages.
@@ -319,10 +331,20 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       }
       if (message.type === 'system' && !message.parent_tool_use_id) {
         if (message.subtype === 'status' && message.status === 'compacting') {
-          if (!compacting) { compacting = true; compactions.start(String(++compactId)); }
+          if (!compacting) { compacting = true; compactions.start(String(++compactId)); checkpoint?.start(); }
         }
         if (message.subtype === 'compact_boundary' && compacting) {
           compactions.complete(String(compactId)); compacting = false;
+          // The synchronous compact hook supplies the first continuation. Do
+          // not race it with stdin steering. If it fails, retain the advisory
+          // for the next assistant event or next ordinary input.
+          checkpoint?.complete();
+        }
+        if (message.subtype === 'hook_response' && message.hook_event === 'SessionStart' && message.exit_code === 0 && message.outcome === 'success') {
+          try {
+            const output = JSON.parse(message.stdout);
+            if (output.hookSpecificOutput?.hookEventName === 'SessionStart') checkpoint?.restored(output.hookSpecificOutput.additionalContext);
+          } catch { /* unrelated hook output does not acknowledge our notice */ }
         }
         // A null status also occurs for permission-mode changes; it is not
         // evidence that compaction succeeded. Only compact_boundary is.
@@ -355,7 +377,8 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       // CLI-generated messages describe its own state; they are not model output.
       // Do not infer this from text: the model may legitimately quote that text.
       if (message.type === 'assistant' && message.error === 'authentication_failed') {
-        throw new PublicError('Claude Code could not authenticate this task. Check claude auth status on the host and sign in again if needed. The task was not retried automatically.');
+        const diagnostic = claudeAuthenticationFailure(message.message?.content);
+        throw new PublicError(`Claude Code could not authenticate this task. Diagnostic: ${diagnostic}. Check claude auth status on the host and sign in again if needed. The task was not retried automatically.`);
       }
       if (message.type === 'assistant' && message.message?.model === '<synthetic>') {
         lastAssistantWasSynthetic = true;
@@ -365,6 +388,11 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
         return;
       }
       if (message.type === 'assistant' && Array.isArray(message.message?.content)) {
+        if (!message.parent_tool_use_id) {
+          if (initialCheckpoint) checkpoint?.delivered(initialCheckpoint.id);
+          checkpoint?.claudeUsage(message.message?.model, message.message?.usage);
+          checkpointSender?.flush();
+        }
         lastAssistantWasSynthetic = false;
         flushProgress();
         assistantText = message.message.content.filter((block: any) => block.type === 'text' && typeof block.text === 'string').map((block: any) => block.text).join('\n');
@@ -374,6 +402,8 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       if (message.type === 'result') {
         if (lastAssistantWasSynthetic) throw new PublicError('Claude Code ended with a service message instead of a model response. Check its login on the host before retrying.');
         if (message.is_error || message.subtype !== 'success') throw new PublicError('Claude could not complete the task. Check your Claude account limits, permissions and login on the host.');
+        if (initialCheckpoint) checkpoint?.delivered(initialCheckpoint.id);
+        checkpoint?.claudeCapacity(message.modelUsage);
         results.push(typeof message.result === 'string' ? message.result : assistantText);
         accepting = false;
         // An update written just before the result may still start one more
@@ -388,6 +418,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       if (live.get(key) === steerHere) live.delete(key);
       accepting = false; clearTimeout(grace); unconfirmed();
       close(); mediaLifetime.abort(); await media?.close(); await rooms?.close(); await web?.close(); await progress.catch(() => {}); await background?.close(); await publication?.close();
+      await checkpointSender?.settled();
     }
     signal.throwIfAborted();
     if (!results.length || !sessionId) throw new PublicError('Claude exited without a complete result and session ID. Please retry after checking its installed version.');
