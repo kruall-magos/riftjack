@@ -286,6 +286,7 @@ async function main() {
         }),
       queuedUpdateMessage: account.kind === 'claude' ? 'Your update is queued for Claude Code in this conversation. It will run after the current step.' : undefined,
       since, timeoutMs: config.timeoutMs, state, report: error => diagnostics(error, account.userId),
+      typing: (room, typing, timeout) => client.setTyping(room, typing, timeout),
       linkedSession: linkedAgent ? (room, event) => links.key(account.userId, room, event) : undefined,
       decoratePrompt: linkedAgent ? (room, event, prompt, steering) => links.prompt(account.userId, room, event, prompt, steering) : undefined,
       notesContext: account.kind === 'manager' ? undefined : (key, room) => notes.context(JSON.stringify([account.userId, key]), room),
