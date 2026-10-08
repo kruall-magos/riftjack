@@ -96,6 +96,12 @@ export function sessionKey(room: string, event: MatrixEvent) {
   return JSON.stringify([room, event.sender, relation?.rel_type === 'm.thread' ? relation.event_id : null]);
 }
 
+export function messageBody(event: MatrixEvent): string | undefined {
+  const content = event.content;
+  return content?.msgtype === 'm.text' && content['m.relates_to']?.['m.in_reply_to']
+    ? content.body?.replace(/^>[^\n]*(?:\r?\n>[^\n]*)*\r?\n\r?\n/, '') : content?.body;
+}
+
 export class Bridge {
   private active?: Active;
   private stopped = false;
@@ -169,8 +175,7 @@ export class Bridge {
     if (event.type !== 'm.room.message' || (event.content?.msgtype !== 'm.text' && !media) || !event.event_id) return;
     if (!Number.isFinite(event.origin_server_ts) || (!fromQueue && event.origin_server_ts! < o.since)) return;
     if (event.content?.['m.relates_to']?.rel_type === 'm.replace') return;
-    const body = !media && event.content?.['m.relates_to']?.['m.in_reply_to']
-      ? event.content.body?.replace(/^>[^\n]*(?:\r?\n>[^\n]*)*\r?\n\r?\n/, '') : event.content?.body;
+    const body = messageBody(event);
     const prompt = body?.trim() || (media ? 'An attachment was sent. Describe what you can inspect, or ask what to do with it.' : '');
     if (!prompt || !(await o.isPrivateRoom(room, event.sender)) || !o.isAuthorized(event.sender)) return;
     if (background) {
