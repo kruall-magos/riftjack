@@ -47,6 +47,36 @@ test('shared-room final text, attachments and mentions use the selected thread, 
   assert.deepEqual(f.errors, []);
 });
 
+test('notes, Matrix context, thread delivery, journal and typing compose in one turn', async t => {
+  const base = fixture(t), journal = new RunJournal(base.file + '.runs');
+  const notes = new RoomNotes(base.file + '.notes'), typing: boolean[] = [];
+  notes.set('!group:test', 'Release reference', 0, '@owner:test');
+  const incoming = event('Explain the release', '$combined');
+  const key = sessionKey('!group:test', incoming);
+  const f = fixture(t, 'codex', async (_mode, prompt) => {
+    assert.match(prompt, /Release reference/);
+    assert.match(prompt, /"bot":"@bot:test"/);
+    assert.match(journal.summary(key), /active; last stage: running/);
+    return 'Answer\n```matrix-thread\n{"create":true}\n```';
+  }, true, {
+    shared: () => true, journal,
+    notesContext: (scope, room) => notes.context(scope, room),
+    decoratePrompt: (room, e, prompt) => matrixPrompt('@bot:test', room, e, prompt, { visibility: 'shared' }),
+    typing: async (_room, value) => { typing.push(value); },
+    reply: async (_room, e, text) => {
+      assert.equal(text, 'Answer');
+      assert.equal(threadRelation(e)?.event_id, '$combined');
+      assert.equal(typing.at(-1), false);
+      assert.match(journal.summary(key), /active; last stage: delivering/);
+    },
+  });
+  await f.bridge.handle('!group:test', incoming);
+  assert.equal(typing.at(-1), false);
+  assert.match(journal.summary(key), /completed; last stage: delivering/);
+  assert.equal(notes.context(key, '!group:test').text, '');
+  assert.deepEqual(f.errors, []);
+});
+
 test('private chats reject thread directives without sending final attachments', async t => {
   let files = 0;
   const f = fixture(t, 'codex', async () => ({ text: 'Answer\n```matrix-thread\n{"create":true}\n```',
@@ -568,13 +598,17 @@ for (const kind of ['codex', 'claude'] as const) test(`${kind} gets private cont
 test('a bang-prefixed attachment caption still receives context instead of becoming a command', async t => {
   const image = { path: '/picture.png', name: 'picture.png', image: true, mimetype: 'image/png', size: 3 };
   let received = '', delivered = 0;
+  const base = fixture(t), notes = new RoomNotes(base.file + '.notes');
+  notes.set('!dm:test', 'Caption reference', 0, '@owner:test');
   const f = fixture(t, 'codex', async (_mode, prompt) => { received = prompt; return 'answer'; }, true, {
     decoratePrompt: (room, e, prompt) => matrixPrompt('@bot:example.com', room, e, prompt),
     receive: async () => image,
     promptDelivered: () => { delivered++; },
+    notesContext: (key, room) => notes.context(key, room),
   });
   await f.bridge.handle('!dm:test', { ...event('!caption'), content: { msgtype: 'm.image', body: '!caption' } });
-  assert.equal(JSON.parse(received.split('\n')[1]).human, '@owner:test');
+  assert.match(received, /Caption reference/);
+  assert.equal(JSON.parse(received.split('Matrix message context:\n')[1].split('\n')[0]).human, '@owner:test');
   assert.ok(received.endsWith('\n!caption'));
   assert.equal(delivered, 1);
 });
