@@ -423,19 +423,19 @@ export class Bridge {
             await this.reply(room, requestEvent, text, true, 'm.text');
           },
         };
-        const noteContext = !next.prompt.startsWith('!') ? o.notesContext?.(backendKey, room) : undefined;
+        const command = !isMedia(next.event.content?.msgtype) && next.prompt.startsWith('!');
+        const noteContext = !command ? o.notesContext?.(backendKey, room) : undefined;
         const task = verb === 'publish' ? o.publish!(publication, controller.signal, interact, () => this.authorize(room, current))
-          : o.run(verb as Mode, (noteContext?.text ?? '') + (next.prompt.startsWith('!') ? next.prompt : o.decoratePrompt?.(room, next.event, next.prompt) ?? next.prompt),
+          : o.run(verb as Mode, (noteContext?.text ?? '') + (command ? next.prompt : o.decoratePrompt?.(room, next.event, next.prompt) ?? next.prompt),
             backendKey, controller.signal, event.sender, next.attachments, interact, publish, hooks);
         current.markReady();
         let result: string | BackendReply;
-        try { result = await task; noteContext?.delivered(); if (verb !== 'publish' && !next.prompt.startsWith('!')) o.promptDelivered?.(); }
+        try { result = await task; noteContext?.delivered(); if (verb !== 'publish' && !command) o.promptDelivered?.(); }
         finally { turnLifetime.abort(); current.running = false; current.interactions.close(); }
         while (current.buffered) await current.steering;
         controller.signal.throwIfAborted();
         runStage = 'delivering';
         if (runId) o.journal!.update(runId, runStage);
-        const command = next.prompt.startsWith('!');
         const response = command ? { text: typeof result === 'string' ? result : result.text, event: next.event }
           : threadReply(typeof result === 'string' ? result : result.text, next.event, !!o.shared?.(room));
         const responseEvent = response.event;
