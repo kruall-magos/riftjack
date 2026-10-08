@@ -36,6 +36,8 @@ export function botHelp(kind: 'codex' | 'claude' | 'grok'): string {
     '### Room notes',
     '- `!notes` — read this room’s notes and version.\n- `!notes set VERSION TEXT` — replace them.\n- `!notes clear VERSION` — clear them.\n- `!notes history` — read previous versions.\n- `!notes restore OLD_VERSION CURRENT_VERSION` — restore an older version.',
     'Notes are shared by bots and threads in this room, persist after reset, and are supplied when the room or version changes. Limit: 4096 UTF-8 bytes and 20 previous versions.',
+    '### Background tasks',
+    '`!tasks` — list background watches and reminders for this chat/thread without a model request, including while busy. Delivery state is not proof of task success.',
     '---',
     'Messages starting with `!` are commands. Unknown commands are not sent to the agent. Create bots and manage access in **Bot Manager**. “Owner” means the initial connector owner.',
   ].join('\n\n');
