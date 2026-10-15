@@ -24,7 +24,7 @@ Use **`!restart supervisor`** to explicitly reload the supervisor as well, even 
 
 ## Restart sequence
 
-`npm --prefix riftjack start` runs a small supervisor. After the restart acknowledgement is successfully sent to Matrix, the connector stops; the supervisor waits for the old process to exit and then starts a new one. The replacement reloads source files and `.env` (environment variables inherited from the launching shell still take precedence). New tasks are blocked once the restart is accepted. If any bot is working or an account is being started/created, restart is refused: wait, or send `!cancel` in the active conversation and retry after it stops. Messages sent during the restart gap are ignored by the normal startup rule.
+`npm --prefix riftjack start` runs a small supervisor. After the restart acknowledgement is successfully sent to Matrix, the connector stops; the supervisor waits for the old process to exit and then starts a new one. The replacement reloads source files and `.env` (environment variables inherited from the launching shell still take precedence). New tasks are blocked once the restart is accepted. If any bot is working or an account is being started/created, restart is refused: wait, or send `!cancel` in the active conversation and retry after it stops. Ordinary human messages to Codex and Claude during the restart gap are recovered by Matrix synchronization; unfinished turns also resume without a new message. See [message recovery](chat.md).
 
 Before acknowledging `!restart`, the connector saves the requesting bot, owner, room and message/thread in `data/restart-notice.json` (under `DATA_DIR` when customized). After startup completes, that same bot sends an encrypted “Connector restarted” reply there, including the number of bots online. Pending notices survive process replacement. Network failures are retried every 30 seconds using the same Matrix transaction ID to prevent duplicate messages; the notice is removed after delivery. If the requesting bot fails to start, the notice remains for a later successful startup. Access and encrypted room membership are checked again before sending. An ordinary start with no pending restart sends no notice.
 
@@ -49,3 +49,25 @@ not retry the diagnostic automatically or fall back to the shared room.
 ## Crash recovery and rollback
 
 If the connector exits unexpectedly, the supervisor starts it again after a delay that grows from 1 s to 60 s on consecutive failures. It does not restart after a normal shutdown (exit code 0) or invalid configuration or an already-owned data directory (exit code 78). Lock contention also does not trigger code rollback. A connector counts as working once its bots are online and it has kept running for 30 seconds; the supervisor then promotes the snapshot captured before that process launched to `.connector-history/good-*` if it differs from the last working version (the last 10 versions are kept). The snapshot contains `src/`, `package.json`, `package-lock.json` and `tsconfig.json`; later edits on disk are not included. If the files change during startup, before the ready signal, that run creates no working snapshot. Pending launch snapshots are discarded when the child exits and are never used for rollback. If the connector crashes before reaching that point and its code differs from the latest working snapshot, the supervisor moves the current code to `.connector-history/failed-*` and restores the snapshot. When this follows `!restart`, the owner who requested it receives the rollback explanation in the usual restart notice. A rollback after an ordinary crash is reported to the owner in the Bot Manager DM once the manager is back online. `scripts/` (including the fetch Python helper), documentation and `node_modules` are outside these snapshots and are not restored by rollback. Check script compatibility with the restored source separately; run `npm --prefix riftjack ci` yourself if dependencies differ. If the supervisor's own code (`supervisor.ts`, `restart.ts`, `restart-notice.ts`, `history.ts`, `errors.ts`) changed since it started, `!restart` also starts the updated supervisor: the running one launches it as a child and only forwards signals, so its PID, terminal and log stay the same. If the running supervisor predates automatic self-reload, relaunch it on the host.
+
+
+## Agent turn after startup
+
+After each connector startup, every Codex and Claude bot with an existing home
+conversation receives a short connector notice:
+
+> Riftjack restarted. Check current work and background tasks; continue if there is work to do.
+
+If a turn in that session already starts from a recovered message, incoming
+message or due background event, the notice is added to it. Otherwise the bot
+gets a separate turn in its home DM (and configured home thread). Active watches
+are not required, and the connector does not read the agent's private task files.
+A standalone restart turn can finish with `NO_REPLY`, without a chat message.
+
+Each startup has a new notice ID; concurrent background pumps cannot start it
+twice. A failed backend call is not immediately repeated for the same notice.
+Authorization, encrypted room privacy and the original session are checked
+before admission. Resetting the session or cancelling the pending home task
+withdraws the notice. It grants no new permissions or confirmation approvals.
+New bots without an established conversation, Bot Manager and externally driven
+Grok workers do not receive a startup model turn.
