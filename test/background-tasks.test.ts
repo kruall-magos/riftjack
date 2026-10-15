@@ -94,6 +94,27 @@ test('task overview limits output and prioritizes active over newest completed r
   assert.equal(text.split('ID: ').length - 1, 20);
 });
 
+test('task overview keeps interrupted retained deliveries ahead of newer cancelled registrations', async t => {
+  const f = setup(t);
+  const reminder = { action: 'remind', message: 'Private reminder body', deliver: 'agent', delay_minutes: 5 };
+  const pending = JSON.parse(f.queue.action({ ...reminder, label: 'Pending recovery' }, target, signal()));
+  await f.queue.pump({ valid: () => true, report: () => {},
+    deliver: async (_target, _event, admit) => { admit(); throw new Error('Backend failed'); } }, Date.parse(pending.due));
+  const interrupted = JSON.parse(f.queue.action({ action: 'list' }, target, signal())).find((w: { id: string }) => w.id === pending.id);
+  assert.equal(interrupted.state, 'interrupted');
+  for (let i = 0; i < 20; i++) {
+    const saved = JSON.parse(f.queue.action({ ...reminder, label: 'Cancelled ' + i }, target, signal()));
+    f.queue.action({ action: 'cancel', id: saved.id }, target, signal());
+  }
+  const before = readFileSync(f.file, 'utf8');
+  const text = f.queue.overview(target);
+  assert.match(text, /20 of 21/);
+  assert.ok(text.includes(pending.id));
+  assert.ok(text.indexOf('Pending recovery') < text.indexOf('Cancelled 19'));
+  assert.doesNotMatch(text, /Private reminder body/);
+  assert.equal(readFileSync(f.file, 'utf8'), before);
+});
+
 test('recurring reminders survive downtime and restart without replaying or catching up missed runs', async t => {
   const f = setup(t);
   const input = { action: 'remind', label: 'Daily', message: 'Check project updates.', deliver: 'agent',

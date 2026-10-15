@@ -196,7 +196,7 @@ export class BackgroundTasks {
     const items = this.watches.filter(w => w.key === target.key && w.session === target.session &&
       w.room === target.room && w.sender === target.sender && w.thread === target.thread && w.workspace === this.workspace);
     if (!items.length) return 'No background watches or reminders in this conversation.';
-    const active = (w: Watch) => w.state === 'waiting' || w.state === 'dispatching';
+    const active = (w: Watch) => w.state === 'waiting' || w.state === 'dispatching' || !!w.delivery;
     const ordered = [...items.filter(active).reverse(), ...items.filter(w => !active(w)).reverse()];
     const lines = ordered.slice(0, 20).map(w => {
       const kind = w.timer ? w.timer.schedule ? 'recurring reminder' : 'reminder' : 'watch';
