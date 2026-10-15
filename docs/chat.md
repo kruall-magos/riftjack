@@ -54,7 +54,7 @@ Inspect the process and logs before retrying work, and register a new watch if
 monitoring should continue. Watches without these options retain the ordinary
 completion/expiry behavior. Notifications still wait for the agent to be idle.
 
-The same tool schedules delayed messages for up to 7 days, for example when you
+The same tool schedules delayed messages for up to 60 days, for example when you
 ask a bot to remind you of something tomorrow:
 
 ```json
@@ -69,7 +69,8 @@ restarts, are listed with `action: "list"`, and can be cancelled before they are
 due. The confirmation and the list show the room and the exact text. A busy bot
 delivers an agent reminder after its current task. A timer delivered more than a
 minute late, for example after the connector was stopped, says when it was due and
-how late it is. A crash during delivery is never replayed.
+how late it is. After a crash, interrupted agent reminders are retried on restart with a warning
+to check previous effects. Uncertain direct room posts are not replayed automatically.
 
 For a recurring reminder, use `schedule` instead of `at` or `delay_minutes`:
 
@@ -83,7 +84,9 @@ changes. A nonexistent local time is skipped; a repeated local time fires only
 at its first occurrence. After downtime, one overdue reminder is delivered and
 the next occurrence is scheduled in the future. The connector persists that next
 occurrence before admitting delivery, so a failed or interrupted run does not
-break the schedule or replay that run. `list` shows the stable schedule ID, next
+lose the next due time. For agent reminders, the interrupted occurrence is
+retained and retried after restart before a new occurrence is admitted. Missed
+schedule intervals are not expanded into a backlog. `list` shows the stable schedule ID, next
 due time and last delivery state; `cancel` stops future occurrences. Resetting
 the conversation or revoking access cancels the schedule.
 
@@ -109,12 +112,25 @@ watch; changing terminal states requires cancelling it first. A bot may have up
 to 100 active watches. Recent completed records are retained with a bounded limit.
 
 A notification starts an ordinary agent turn; it can consume the model's usage
-limit and still needs the usual approvals for protected actions. Delivery is
-attempted once. If the connector crashes after admitting the turn, the watch is
-marked `interrupted` on startup and is not automatically replayed: the agent may
-already have acted. Inspect the conversation and saved results before registering
-another watch. The `delivered` state means the notification turn was admitted and
-finished handling; it does not certify that the underlying task or agent succeeded.
+limit and still needs the usual approvals for protected actions. Agent reminders
+and watch notifications are saved before execution and marked `delivered` only
+after the turn and its response delivery complete successfully. An intentional
+`NO_REPLY` is a successful, silent completion, including in private rooms. This
+confirms handling of the notification, not success of the underlying build or task.
+
+If the backend fails, times out or the connector exits mid-turn, the notification
+is retained for the next connector restart. There is no immediate retry loop.
+Recovery uses the same occurrence ID and observed watch result, even if the
+status file has since changed. A warning tells the agent to inspect existing
+results before repeating actions or requesting new confirmations. Cancellation,
+a reset session, revoked access or a changed workspace prevents recovery.
+
+External actions are not transactional with this checkpoint. A crash after a
+reply or other effect but before recording completion can still cause another
+turn; recovery does not guarantee exactly-once effects. Previously completed
+records are not replayed. Older interrupted records without a saved notification
+remain uncertain and require inspection. Direct `deliver=room` messages keep
+uncertain-send status after an interrupted send and are not automatically resent.
 
 These watches are available to Codex and Claude bots. External workers continue
 to use their existing durable task queue; this tool does not monitor arbitrary
@@ -133,7 +149,7 @@ Claude steers updates from the active conversation into the running task when it
 
 **Codex steering:** while a Codex bot is working, send another message in the same room/thread from the same Matrix account. The connector delivers it to the active task with Codex App Server's `turn/steer`; it does not cancel or restart the task. Text, images, files, and audio attachments can all accompany an update. You receive an acknowledgement after Codex accepts it. During startup, updates wait until the active turn is ready. If the task has already finished, the message runs as the next turn in the same conversation. At most 10 updates/follow-ups can await delivery at once; each text/caption is limited to 16,000 characters. Delivery is serialized, and duplicate Matrix events are ignored.
 
-Messages from a different account, room, thread, or bot cannot steer the current task. Different bots can run in parallel, but each bot has only one active task. An ordinary bot refuses another conversation while busy; a linked agent queues other-room messages for separate turns. `!reset` requires an idle bot; `!cancel` stops the current task and discards pending follow-ups. The task timeout covers steering and any immediate follow-ups; sending updates does not reset it. Same-conversation pending updates live in memory and are not replayed after a crash/restart. The [linked-room queue](shared-conversations.md#messages-and-turns) is persisted separately. If steering delivery fails with an uncertain outcome, the connector reports it rather than automatically repeating the request.
+Messages from a different account, room, thread, or bot cannot steer the current task. Different bots can run in parallel, but each bot has only one active task. Codex and Claude bots queue other-room messages for separate turns. `!reset` requires an idle bot; `!cancel` stops the current task and discards pending follow-ups. The task timeout covers steering and any immediate follow-ups; sending updates does not reset it. Unfinished human messages and updates are saved and recovered after restart. If steering delivery fails with an uncertain outcome, the connector reports it and retains the message for restart recovery, with a warning to check prior effects.
 
 The connector uses the Codex App Server JSONL protocol over private stdio pipes, including `thread/start`, `thread/resume`, `turn/start`, `turn/steer`, and `turn/interrupt`. Existing Codex conversation IDs remain usable. This stdio transport opens no server port; connector MCP tools separately use authenticated loopback HTTP listeners during a task. The App Server account must report ChatGPT authentication before a turn can start.
 
@@ -185,7 +201,29 @@ The connector reads the plugin description, apps and MCP servers from `openai-cu
 
 ## Delivery and formatting
 
-Messages sent before the current startup are ignored, including messages sent while the connector was offline. Duplicate events are recorded before work begins to reduce accidental re-execution. An interrupted task is not automatically replayed after restart. Tasks time out after 24 hours by default. Replies are chunked, with a 100,000-character cap.
+For Codex and Claude, ordinary human messages and attachments are saved before the
+Matrix synchronization checkpoint advances. After restart, Riftjack resumes
+unfinished messages in arrival order and catches up on messages sent while it
+was offline. Limited Matrix timelines are paginated back to the saved room event.
+No new “continue” message is needed. Access, room privacy and shared-room routing
+are checked again. The first startup establishes a history boundary; older
+messages are not imported.
+
+Messages remain recoverable until their turn and final reply delivery succeed.
+A deliberate `NO_REPLY` in a shared room also completes a message. A failed turn
+is retried on restart, not repeatedly within the same connector process.
+`!cancel` discards unfinished messages in that conversation, including messages
+saved after a failed turn; `!reset` does so too for unlinked conversations.
+Commands, approval reactions, peer mentions and scheduled notices are not part
+of this human-message recovery mechanism. Bot Manager keeps its existing
+startup filtering; Grok uses its worker queue.
+
+Recovery is at-least-once processing, not a transaction around the agent's work.
+An interrupted turn may already have changed files, pushed a commit or sent a
+reply. The recovered prompt tells the agent to inspect existing results before
+continuing, and does not renew expired confirmations. A crash between reply
+delivery and saving completion can cause a repeated answer. Recovery depends
+on Matrix retaining accessible history and the bot retaining decryption keys. Tasks time out after 24 hours by default. Replies are chunked, with a 100,000-character cap.
 
 Coding bots also forward user-facing progress messages while a task runs. Codex sends completed `commentary` messages; Claude sends assistant text preceding tool use or a later assistant response. Thinking blocks and tool internals are not forwarded, and the final response is sent separately.
 
@@ -236,6 +274,8 @@ The repository path is relative to that bot's workspace (an absolute path inside
 Riftjack resolves the push destination, reads its branch tip and prepares a self-contained HTML attachment. It contains the final diff and **every outgoing commit**, including changes later reverted. File sections collapse, added/deleted lines have colors and line numbers, and the file needs no JavaScript or external resources. Binary contents are marked as unavailable for text review. Uncommitted files, other local branches and unrelated tags are excluded. Git authentication must already work on the host; the connector does not collect credentials.
 
 After the attachment and confirmation text have been delivered, approve with the usual reaction or `!approve ID`, or decline with `!deny ID`. Delivery does not prove the report was opened. Approval applies to the shown commit, destination branch and expected remote tip only. Changed HEAD or destination invalidates the review. An explicit Git lease also prevents a concurrent remote update from being overwritten. Only fast-forward updates and new branches from complete (non-shallow) repositories are supported. For a new branch on an existing remote, the report starts at its unique common ancestor with the remote default branch. The report identifies that published branch, its tip and the review base; local tracking refs and other remotes are not used to omit history. The published branch tip is checked again before pushing. An empty remote still receives a complete-history review. There is no automatic retry after an uncertain push result.
+
+A technical interruption or lost tool result does not cancel the authorized task. Before preparing another review, the agent checks the destination and whether the previous request is still active. If the commits are already published, it reports that result without repeating the push. If they are not published and no request remains active, it can prepare a fresh review without another invitation; a new human confirmation is still required. An explicit human decline or cancellation requires renewed permission to prepare another review. If the outcome or cancellation reason cannot be established, the agent reports the blocker and asks for clarification. Expired confirmations are never reused.
 
 `!cancel`, access revocation and task timeout stop a pending review. Approval is conversation-scoped and expires on restart. Reports are deleted from the host after the request ends; the encrypted attachment remains in Matrix. `!status` remains available while reviewing, but ordinary chat messages cannot steer the publication into a different action. Reports over 100 outgoing commits or 8 MiB of diff text are refused rather than truncated. The normal attachment size limit also applies.
 
