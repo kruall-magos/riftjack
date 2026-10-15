@@ -16,7 +16,7 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
   context: { event: MatrixEvent; key: string }, transport: {
     allowed(room: string, sender: string): Promise<boolean>;
     stopping(): boolean;
-    send(room: string, content: { msgtype: 'm.text'; body: string; 'm.mentions': { user_ids: string[] }; [GRANT]?: string }): Promise<string>;
+    send(room: string, content: { msgtype: 'm.text'; body: string; 'm.mentions': { user_ids: string[] }; [GRANT]?: ReturnType<ConversationLinks['reserve']> }): Promise<string>;
     read?(room: string, eventId: string): Promise<MatrixEvent | undefined>;
     receive?(event: MatrixEvent, key: string, signal: AbortSignal, authorize: () => Promise<void>): Promise<IncomingAttachment>;
     maxBytes?: number;
@@ -49,7 +49,7 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
       const event = await transport.read(request.room, request.event_id);
       await allowed(request.room);
       if (!event || event.event_id !== request.event_id || (event.room_id && event.room_id !== request.room) ||
-          event.type !== 'm.room.message' || ![shared.owner, ...shared.bots].includes(event.sender!) ||
+          event.type !== 'm.room.message' || ![shared.owner, ...shared.bots, ...(shared.observers ?? [])].includes(event.sender!) ||
           !isMedia(event.content?.msgtype) || !event.content?.file || event.content['m.relates_to']?.rel_type === 'm.replace') {
         throw new PublicError('No encrypted attachment found on that shared-room message.');
       }
@@ -76,6 +76,10 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
       msgtype: 'm.text', body: peer ? request.text + '\n\n' + peer : request.text, 'm.mentions': { user_ids: peer ? [peer] : [] },
       ...(grant && { [GRANT]: grant }),
     });
+    // Record executor correlation before returning the tool result, without
+    // depending on a later sync echo (which may arrive after a fast completion).
+    if (request.text.startsWith('!exec ')) links.observe(bot, request.room, { type: 'm.room.message', sender: bot, event_id: eventId,
+      content: { msgtype: 'm.text', body: request.text } });
     return JSON.stringify({ status: 'sent', room: request.room, event_id: eventId });
   };
 }

@@ -21,6 +21,40 @@ function reaction(target: string, key = '✅', id = '$reaction'): MatrixEvent {
     content: { 'm.relates_to': { rel_type: 'm.annotation', event_id: target, key } } };
 }
 
+test('typing covers backend work and final delivery, but not local commands or denied messages', async t => {
+  const calls: boolean[] = [], ready = gate(), finish = gate();
+  const f = fixture(t, 'codex', async () => { ready.release(); await finish.promise; return 'done'; }, true, {
+    typing: async (_room, typing) => { calls.push(typing); },
+    reply: async (_room, _event, text) => { if (text === 'done') assert.equal(calls.at(-1), false); },
+  });
+  await f.bridge.handle('!dm:test', event('!status', '$status'));
+  await f.bridge.handle('!dm:test', { ...event('hello', '$denied'), sender: '@other:test' });
+  assert.deepEqual(calls, []);
+  const task = f.bridge.handle('!dm:test', event()); await ready.promise;
+  assert.deepEqual(calls, [true]);
+  finish.release(); await task;
+  assert.equal(calls.at(-1), false);
+  // Final delivery may already clear the indicator before task cleanup does.
+  assert.equal(calls.filter(typing => typing).length, 1);
+});
+
+for (const end of ['failure', 'cancel', 'stop'] as const) test(`typing clears after task ${end}`, async t => {
+  const calls: boolean[] = [], ready = gate();
+  const f = fixture(t, 'codex', async (_mode, _prompt, _key, signal) => {
+    ready.release();
+    if (end === 'failure') throw new Error('failed');
+    await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
+    signal.throwIfAborted(); return 'done';
+  }, true, { typing: async (_room, typing) => { calls.push(typing); } });
+  const task = f.bridge.handle('!dm:test', event()); await ready.promise;
+  if (end === 'cancel') await f.bridge.handle('!dm:test', event('!cancel', '$cancel'));
+  if (end === 'stop') f.bridge.stop();
+  await task;
+  assert.equal(calls[0], true);
+  assert.equal(calls.at(-1), false);
+  assert.equal(calls.filter(typing => typing).length, 1);
+});
+
 test('manager accepts avatar names and reports target errors before downloading images', async t => {
   let accounts!: Accounts, downloads = 0;
   const f = fixture(t, 'manager', undefined, true, {
@@ -389,7 +423,7 @@ test('attachment replies go through the media sender with the original event', a
     },
   });
   await f.bridge.handle('!dm:test', incoming);
-  assert.equal(sends, 1); assert.deepEqual(f.replies, ['…']);
+  assert.equal(sends, 1); assert.deepEqual(f.replies, []);
 });
 
 for (const kind of ['codex', 'claude', 'manager'] as const) test(kind + ' handles owner !restart locally and ignores replay', async t => {
@@ -576,16 +610,16 @@ test('same-conversation messages steer in order, once, without cancelling or run
 });
 
 test('steering received before the initial backend starts waits for readiness', async t => {
-  const acknowledging = gate(), acknowledged = gate(), finish = gate();
+  const preparing = gate(), prepared = gate(), finish = gate();
   let running = false, steered = false;
   const f = fixture(t, 'codex', async () => { running = true; await finish.promise; return 'done'; }, true, {
-    reply: async (_room, _event, text) => { if (text === '…') { acknowledging.release(); await acknowledged.promise; } },
+    receive: async () => { preparing.release(); await prepared.promise; return { path: '/note.txt', name: 'note.txt', mimetype: 'text/plain', size: 1, image: false }; },
     steer: async () => { assert.equal(running, true); steered = true; return true; },
   });
-  const task = f.bridge.handle('!dm:test', event());
-  await acknowledging.promise;
+  const task = f.bridge.handle('!dm:test', { ...event(), content: { msgtype: 'm.file', body: 'hello' } });
+  await preparing.promise;
   const update = f.bridge.handle('!dm:test', event('clarification', '$2'));
-  acknowledged.release(); await update;
+  prepared.release(); await update;
   assert.equal(steered, true); finish.release(); await task;
 });
 
@@ -881,4 +915,78 @@ test('compaction service hook uses the human identity, and delivery failure does
   assert.deepEqual(notices, ['started', 'completed'].map(phase => ({ phase, context: { room: '!dm:test', sender: '@owner:test' } })));
   assert.equal(f.errors.length, 1);
   assert.equal(f.replies.at(-1), 'answer');
+});
+
+
+for (const delivery of ['progress', 'attachment', 'compaction'] as const) test(`typing clears before ${delivery} delivery and resumes after a delay while the task is active`, async t => {
+  const ready = gate(), finish = gate();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let visible = false, serverTyping = false;
+  const f = fixture(t, 'codex', async (_mode, _prompt, _key, _signal, _sender, _files, _interact, _publish, hooks) => {
+    if (delivery === 'compaction') await hooks!.compaction!('completed');
+    else if (delivery === 'progress') await hooks!.progress!('Still working');
+    else await hooks!.sendAttachments!([{ root: '/outbox', path: '/outbox/file.txt' }], new AbortController().signal);
+    ready.release(); await finish.promise;
+    return 'done';
+  }, true, {
+    typing: async (_room, typing) => {
+      // Synapse renews the TTL without emitting m.typing if the value is unchanged.
+      if (serverTyping !== typing) visible = typing;
+      serverTyping = typing;
+    },
+    reply: async () => { assert.equal(serverTyping, false); visible = false; },
+    sendAttachments: async () => { assert.equal(serverTyping, false); visible = false; },
+    compaction: async () => { visible = false; },
+  });
+  const task = f.bridge.handle('!dm:test', event());
+  try {
+    await ready.promise;
+    assert.equal(visible, false);
+    t.mock.timers.tick(249); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(visible, false);
+    t.mock.timers.tick(1); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(visible, true);
+  } finally { finish.release(); await task; }
+  assert.equal(visible, false);
+});
+
+
+test('a compaction notice sent home does not disturb typing in the active shared room', async t => {
+  const ready = gate(), finish = gate(), notices: string[] = [], updates: [string, boolean][] = [];
+  const f = fixture(t, 'codex', async (_mode, _prompt, _key, _signal, _sender, _files, _interact, _publish, hooks) => {
+    await hooks!.compaction!('started');
+    ready.release(); await finish.promise;
+    return 'done';
+  }, true, {
+    compactionRoom: '!home:test',
+    compaction: async (_phase, { room }) => { notices.push(room); },
+    typing: async (room, value) => { updates.push([room, value]); },
+  });
+  const task = f.bridge.handle('!shared:test', event());
+  try {
+    await ready.promise;
+    assert.deepEqual(notices, ['!home:test']);
+    assert.deepEqual(updates, [['!shared:test', true]]);
+  } finally { finish.release(); await task; }
+  assert.equal(updates.at(-1)![1], false);
+});
+
+test('an interrupted compaction notice is delivered after cancellation without restoring typing', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  const ready = gate(), notices: string[] = [], updates: boolean[] = [];
+  const f = fixture(t, 'codex', async (_mode, _prompt, _key, signal, _sender, _files, _interact, _publish, hooks) => {
+    ready.release();
+    await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
+    await hooks!.compaction!('unconfirmed');
+    signal.throwIfAborted(); return 'done';
+  }, true, {
+    compaction: async phase => { notices.push(phase); },
+    typing: async (_room, value) => { updates.push(value); },
+  });
+  const task = f.bridge.handle('!dm:test', event()); await ready.promise;
+  f.bridge.stop(); await task;
+  t.mock.timers.tick(30_000); await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(notices, ['unconfirmed']);
+  assert.equal(updates.filter(Boolean).length, 1);
+  assert.equal(updates.at(-1), false);
 });

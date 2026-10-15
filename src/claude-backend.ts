@@ -159,6 +159,7 @@ export function claudeArguments(config: Config, session?: string, interactive = 
   const readOnly = config.sandbox === 'read-only';
   const tools = readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash';
   const settings = {
+    ...(config.claudeServiceTier !== undefined && { fastMode: config.claudeServiceTier === 'fast' }),
     hooks: claudeCheckpointHooks(config.workspace),
     // Sandboxed Bash skips this blanket ask rule in auto-allow mode. Outside the
     // sandbox it takes precedence over saved allow rules, including exclusions.
@@ -405,6 +406,9 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
         if (initialCheckpoint) checkpoint?.delivered(initialCheckpoint.id);
         checkpoint?.claudeCapacity(message.modelUsage);
         results.push(typeof message.result === 'string' ? message.result : assistantText);
+        // This turn's answer is retained for final delivery. A later assistant
+        // event in the same process must not flush it again as progress.
+        pendingProgress = '';
         accepting = false;
         // An update written just before the result may still start one more
         // turn in this process; wait briefly for its echo before closing input.
