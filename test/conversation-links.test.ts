@@ -260,7 +260,7 @@ test('an outbound room message can mention the peer only with peer credit', asyn
   // The credit is spent as the message is prepared; the grant travels with it.
   assert.equal(f.links.peerCredit(bot), PEER_CREDIT - 1);
   const [content] = sent as Record<string, unknown>[];
-  assert.equal(typeof content[GRANT], 'string');
+  assert.equal(typeof content[GRANT], 'object');
   assert.deepEqual({ ...content, [GRANT]: undefined }, { msgtype: 'm.text', body: 'Please review.\n\n' + peer, 'm.mentions': { user_ids: [peer] }, [GRANT]: undefined });
   // More mentions than credit cannot be sent ahead of their delivery.
   for (let i = 1; i < PEER_CREDIT; i++) await send('paid-' + i);
@@ -884,4 +884,209 @@ test('an agent may decline a shared-room human message with NO_REPLY, but not a 
   });
   await withFile.handle(group, message('Send the file', '$file'));
   assert.deepEqual(sent, ['attachment']);
+});
+
+test('configured observers share text and attachments but never gain controller or peer authority', async t => {
+  const f = fixture(t), observer = '@executor:test';
+  (f.config.rooms[0] as any).observers = [observer];
+  writeFileSync(f.path, JSON.stringify(f.config));
+  const links = f.load();
+  const observation = message('job: succeeded', '$executor-result', observer);
+  assert.equal(links.observe(bot, group, observation), true);
+  observation.content!['m.mentions'] = { user_ids: [bot] };
+  assert.equal(links.mention(bot, group, observation), undefined);
+  assert.throws(() => links.key(bot, group, observation));
+  const prompt = JSON.parse(links.prompt(bot, group, message('Inspect the result'), 'Inspect the result').split('\n')[1]);
+  assert.ok(prompt.participants.includes(observer));
+  assert.equal(prompt.unreadSharedMessages[0].role, 'participant');
+  assert.equal(prompt.unreadSharedMessages[0].body, 'job: succeeded');
+  const action = linkedRoomMessages(links, bot, { event: message('Read log'), key: canonical }, {
+    allowed: async () => true, stopping: () => false, send: async () => assert.fail('No send'),
+    read: async () => ({ ...observation, content: { msgtype: 'm.file', body: 'output.log', file: { url: 'mxc://test/log' } as any } }),
+    receive: async (_e, _key, _signal, authorize) => { await authorize(); return { path: '/local/output.log', name: 'output.log', size: 4, image: false, mimetype: 'text/plain' }; },
+  });
+  const received = JSON.parse(await action({ action: 'receive_attachment', room: group, event_id: '$executor-result' }, new AbortController().signal));
+  assert.equal(received.status, 'received');
+  (f.config.rooms[0] as any).observers = [human]; writeFileSync(f.path, JSON.stringify(f.config));
+  assert.throws(() => f.load(), /shared room/);
+});
+
+test('executor notifications require configured sender, own persisted request, job match and opt-in progress', async t => {
+  const f = fixture(t), executor = '@executor:test';
+  Object.assign(f.config.rooms[0], { observers: [executor, '@observer:test'], executors: [executor] });
+  writeFileSync(f.path, JSON.stringify(f.config));
+  let links = f.load();
+  const action = linkedRoomMessages(links, bot, { event: message('Run'), key: canonical }, {
+    allowed: async () => true, stopping: () => false, send: async () => '$request',
+  });
+  await action({ action: 'send', id: 'job', room: group, text: `!exec ${executor} {"action":"run","id":"job","wakeIntervalSeconds":60}` }, new AbortController().signal);
+  links.prompt(bot, group, message('Next'), 'Next'); links.acknowledge(bot);
+  links = f.load(); // Correlation survives consumed history and restart, without sync echo.
+  const result: MatrixEvent = { ...message('Finished', '$result', executor), content: {
+    msgtype: 'm.text', body: 'Finished', 'm.mentions': { user_ids: [bot] },
+    'riftjack.executor_result': { jobId: 'job', reason: 'completed', request: '$request' },
+  } };
+  assert.match(links.executorResult(bot, group, result)!.body, /untrusted task output/);
+  assert.equal(links.executorResult(peer, group, result), undefined);
+  for (const reason of ['uncertain', 'progress']) {
+    const e = structuredClone(result); e.content!['riftjack.executor_result']!.reason = reason;
+    assert.ok(links.executorResult(bot, group, e));
+  }
+  const invalid: MatrixEvent[] = [
+    { ...result, sender: '@observer:test' }, { ...result, type: 'm.room.encrypted' },
+    { ...result, content: { ...result.content, 'm.mentions': {} } },
+    { ...result, content: { ...result.content, 'm.relates_to': { rel_type: 'm.replace' } } },
+  ];
+  for (const patch of [{ jobId: 'other' }, { request: '$missing' }, { reason: 'response' }]) {
+    invalid.push({ ...result, content: { ...result.content, 'riftjack.executor_result': { ...result.content!['riftjack.executor_result'], ...patch } } });
+  }
+  for (const e of invalid) assert.equal(links.executorResult(bot, group, e), undefined);
+  links.observe(bot, group, message(`!exec ${executor} {"action":"run","id":"quiet"}`, '$quiet', bot));
+  const quiet = structuredClone(result); quiet.content!['riftjack.executor_result'] = { jobId: 'quiet', request: '$quiet', reason: 'progress' };
+  assert.equal(links.executorResult(bot, group, quiet), undefined);
+  result.content!.body = '\u0001'.repeat(2000);
+  assert.ok(links.executorResult(bot, group, result)!.body.length <= 4000);
+  (f.config.rooms[0] as any).executors = [peer]; writeFileSync(f.path, JSON.stringify(f.config));
+  assert.throws(f.load, /configured observers/);
+});
+
+
+// Distinct state/history files model two trusted connector installations.
+function separateInstallations(t: { after(fn: () => void): void }) {
+  const a = fixture(t), b = fixture(t);
+  const peerHome = '!peer-home:test';
+  b.state.update(sessionKey(peerHome, message('')), { claude: 'remote-thread' });
+  writeFileSync(b.path, JSON.stringify({ version: 1,
+    agents: [{ bot: peer, owner: human, home: peerHome, session: 'remote-thread' }],
+    rooms: [{ room: group, owner: human, bots: [bot, peer] }] }));
+  const loadPeer = () => new ConversationLinks(b.path, join(b.dir, 'history.json'),
+    [{ userId: peer, kind: 'claude', name: 'Reviewer', accessToken: 'test' }], b.state, human);
+  return { a, b: { ...b, load: loadPeer, links: loadPeer() } };
+}
+function wireEvent(links: ConversationLinks, sender: string, recipient: string, id: string) {
+  // Round-trip through JSON as a decrypted Matrix event would.
+  return JSON.parse(JSON.stringify({ ...message('Review this', id, sender),
+    content: links.outgoing(sender, group, { msgtype: 'm.text', body: 'Review this' }, [recipient]) })) as MatrixEvent;
+}
+function admit(links: ConversationLinks, recipient: string, event: MatrixEvent) {
+  links.observe(recipient, group, event);
+  return links.mention(recipient, group, event);
+}
+
+test('separate installations exchange credit across restarts and eventually exhaust both reserves', t => {
+  const f = separateInstallations(t);
+  let a = f.a.links, b = f.b.links;
+  a.credit(bot);
+  let sender = bot, recipient = peer;
+  const passed: number[] = [];
+  for (let hop = 0; hop < 20; hop++) {
+    const sending = sender === bot ? a : b;
+    if (!sending.peerCredit(sender)) break;
+    const event = wireEvent(sending, sender, recipient, '$wire-' + hop);
+    const remaining = (event.content![GRANT] as any).remaining;
+    passed.push(remaining);
+    let receiving = recipient === bot ? a : b;
+    const expected = Math.max(receiving.peerCredit(recipient), remaining);
+    const notice = admit(receiving, recipient, event)!;
+    assert.ok(notice);
+    // The consumed grant cannot be reused even with a different Matrix event ID.
+    receiving = recipient === bot ? f.a.load() : f.b.load();
+    assert.equal(admit(receiving, recipient, event), undefined);
+    assert.equal(admit(receiving, recipient, { ...event, event_id: '$copy-' + hop }), undefined);
+    const restoredNotice = JSON.parse(JSON.stringify(notice));
+    const context = JSON.parse(receiving.prompt(recipient, group, restoredNotice, notice.content!.body!).split('\n')[1]);
+    assert.equal(context.peerCredit, expected);
+    if (recipient === bot) a = receiving; else b = receiving;
+    [sender, recipient] = [recipient, sender];
+  }
+  assert.deepEqual(passed, [4, 3, 3, 2, 2, 1, 1, 0, 0]);
+  assert.equal(a.reserve(bot, group), undefined);
+  assert.equal(b.reserve(peer, group), undefined);
+});
+
+test('each outgoing mention passes the remaining reserve and duplicate delivery cannot refill it', t => {
+  const { a, b } = separateInstallations(t);
+  a.links.credit(bot);
+  const first = wireEvent(a.links, bot, peer, '$send-1');
+  const second = wireEvent(a.links, bot, peer, '$send-2');
+  const x = first.content![GRANT] as any, y = second.content![GRANT] as any;
+  assert.equal(x.remaining, 4); assert.equal(y.remaining, 3);
+  assert.equal(x.since, y.since); assert.notEqual(x.id, y.id);
+  assert.ok(admit(b.links, peer, second)); // Deliver out of order.
+  assert.equal(b.links.peerCredit(peer), 3);
+  assert.ok(admit(b.links, peer, first));
+  assert.equal(b.links.peerCredit(peer), 4);
+  b.links.reserve(peer, group);
+  assert.equal(admit(b.links, peer, { ...first, event_id: '$copy' }), undefined);
+  assert.equal(b.links.peerCredit(peer), 3);
+  for (let i = 2; i < PEER_CREDIT; i++) assert.ok(a.links.reserve(bot, group));
+  assert.equal(a.links.reserve(bot, group), undefined);
+});
+
+test('a recipient keeps its own larger credit even when a mention passes zero', t => {
+  const { a, b } = separateInstallations(t);
+  a.links.credit(bot);
+  for (let i = 1; i < PEER_CREDIT; i++) a.links.reserve(bot, group);
+  const zero = wireEvent(a.links, bot, peer, '$zero');
+  assert.equal((zero.content![GRANT] as any).remaining, 0);
+  b.links.credit(peer);
+  const notice = admit(b.links, peer, zero)!; assert.ok(notice);
+  b.links.prompt(peer, group, notice, notice.content!.body!);
+  assert.equal(b.links.peerCredit(peer), PEER_CREDIT);
+  assert.equal(b.links.reserve(peer, group)!.remaining, PEER_CREDIT - 1);
+  assert.equal(b.load().peerCredit(peer), PEER_CREDIT - 1);
+});
+
+test('delayed remote mentions with burst replies exhaust credit without new human input', t => {
+  const { a, b } = separateInstallations(t);
+  a.links.credit(bot); b.links.credit(peer);
+  const queue: { recipient: string; event: MatrixEvent }[] = [];
+  let id = 0;
+  const burst = (sender: string) => {
+    const links = sender === bot ? a.links : b.links, recipient = sender === bot ? peer : bot;
+    while (links.peerCredit(sender)) queue.push({ recipient, event: wireEvent(links, sender, recipient, '$burst-' + id++) });
+  };
+  burst(bot); burst(peer);
+  let delivered = 0;
+  while (queue.length && delivered < 1000) {
+    const next = queue.shift()!;
+    const links = next.recipient === bot ? a.links : b.links;
+    assert.ok(admit(links, next.recipient, next.event));
+    burst(next.recipient);
+    delivered++;
+  }
+  assert.equal(queue.length, 0);
+  assert.ok(delivered > 10 && delivered < 1000);
+  assert.deepEqual([a.links.peerCredit(bot), b.links.peerCredit(peer)], [0, 0]);
+});
+
+test('wire grants validate identity, destination, bounds and expiry before admitting a peer', t => {
+  const { a, b } = separateInstallations(t);
+  a.links.credit(bot); a.links.prompt(bot, home, message('Start'), 'Start');
+  const valid = wireEvent(a.links, bot, peer, '$valid-wire');
+  const original = valid.content![GRANT] as any;
+  const variants = [null, 'old-local-id', {}, { ...original, version: 2 },
+    { ...original, from: human }, { ...original, to: bot }, { ...original, room: home },
+    { ...original, remaining: -1 }, { ...original, remaining: PEER_CREDIT }, { ...original, remaining: 1.5 },
+    { ...original, since: Date.now() + 120000 }, { ...original, since: Date.now() - 86400000 },
+    { ...original, id: '' }, { ...original, id: 'x'.repeat(65) }];
+  for (const [i, grant] of variants.entries()) {
+    const event = { ...valid, event_id: '$bad-wire-' + i, content: { ...valid.content!, [GRANT]: grant } };
+    assert.equal(admit(b.links, peer, event), undefined);
+  }
+  assert.equal(admit(b.links, peer, { ...valid, event_id: '$outsider', sender: '@outsider:test' }), undefined);
+  assert.ok(admit(b.links, peer, valid));
+});
+
+test('passing credit does not renew its deadline', t => {
+  const { a, b } = separateInstallations(t);
+  let now = Date.now(); t.mock.method(Date, 'now', () => now);
+  a.links.credit(bot, now - 23 * 3600000); a.links.prompt(bot, home, message('Start'), 'Start');
+  const event = wireEvent(a.links, bot, peer, '$old-credit');
+  const notice = admit(b.links, peer, event)!; assert.ok(notice);
+  b.links.prompt(peer, group, notice, notice.content!.body!);
+  const forwarded = b.links.reserve(peer, group)!;
+  assert.equal(forwarded.since, (event.content![GRANT] as any).since);
+  now += 3600001;
+  assert.equal(b.links.reserve(peer, group), undefined);
 });
